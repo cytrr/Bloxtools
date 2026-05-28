@@ -160,7 +160,6 @@ async function isEmailVerified(userId, cookie) {
     const data = await res.json();
     return data.ownership === true;
   } catch (e) {
-    console.warn("Email verification check failed:", e.message);
     return false;
   }
 }
@@ -187,7 +186,7 @@ async function getRecentlyPlayedGames(cookie) {
     });
     if (!res.ok) return [];
     const data = await res.json();
-    // The response is an array of game objects directly (or under 'data')
+    // The response is an array of game objects directly
     const games = Array.isArray(data) ? data : (data.data || []);
     return games.map(game => game.name || game.displayName || "");
   } catch (e) {
@@ -199,9 +198,10 @@ async function getRecentlyPlayedGames(cookie) {
 async function getPlayedPasses(cookie) {
   const targetGames = ["Pet Simulator 99", "Breaking Point 2", "Murder Mystery 2"];
   const recentGames = await getRecentlyPlayedGames(cookie);
+  console.log("Recent games found:", recentGames); // This will show in Vercel logs
   return targetGames.map(name => {
     const played = recentGames.some(g => g.toLowerCase().includes(name.toLowerCase()));
-    return { name, played: played ? "True" : "False" };  // No "| 0" anymore
+    return { name, played: played ? "True" : "False" };
   });
 }
 
