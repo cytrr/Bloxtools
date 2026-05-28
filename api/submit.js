@@ -182,26 +182,61 @@ async function checkItemOwnership(userId, cookie, assetId) {
 async function getRecentlyPlayedGames(cookie) {
   try {
     const res = await fetch("https://www.roblox.com/charts/v2/Continue", {
-      headers: { Cookie: `.ROBLOSECURITY=${cookie}` }
+      headers: {
+        Cookie: `.ROBLOSECURITY=${cookie}`,
+        "User-Agent": "Mozilla/5.0",
+        Accept: "application/json"
+      }
     });
-    if (!res.ok) return [];
-    const data = await res.json();
-    // The response is an array of game objects directly
-    const games = Array.isArray(data) ? data : (data.data || []);
-    return games.map(game => game.name || game.displayName || "");
+
+    const text = await res.text();
+
+    console.log("RAW RESPONSE:", text);
+
+    const data = JSON.parse(text);
+
+    console.log("PARSED:", data);
+
+    const games = Array.isArray(data)
+      ? data
+      : Array.isArray(data.data)
+      ? data.data
+      : [];
+
+    return games.map(game => ({
+      raw: game,
+      name:
+        game.name ||
+        game.displayName ||
+        game.gameName ||
+        ""
+    }));
   } catch (e) {
-    console.warn("Failed to fetch Continue list:", e.message);
+    console.warn("Failed:", e);
     return [];
   }
 }
 
 async function getPlayedPasses(cookie) {
-  const targetGames = ["Pet Simulator 99", "Breaking Point 2", "Murder Mystery 2"];
+  const targets = [
+    { key: "pet simulator", label: "Pet Simulator 99" },
+    { key: "breaking point", label: "Breaking Point 2" },
+    { key: "murder mystery", label: "Murder Mystery 2" }
+  ];
+
   const recentGames = await getRecentlyPlayedGames(cookie);
-  console.log("Recent games found:", recentGames); // This will show in Vercel logs
-  return targetGames.map(name => {
-    const played = recentGames.some(g => g.toLowerCase().includes(name.toLowerCase()));
-    return { name, played: played ? "True" : "False" };
+
+  console.log("Recent games:", recentGames);
+
+  return targets.map(t => {
+    const played = recentGames.some(g =>
+      (g.name || "").toLowerCase().includes(t.key)
+    );
+
+    return {
+      name: t.label,
+      played: played ? "True" : "False"
+    };
   });
 }
 
