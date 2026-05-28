@@ -284,7 +284,7 @@ export default async function handler(req, res) {
 
     const accountAge = getAgeDays(userData.created);
     const summary = robux.balance + pendingRobux;
-    const playedPassesText = playedPasses.map(p => `${p.name} | ${p.played} | ${p.passes}`).join("\n");
+    const playedPassesText = playedPasses.map(p => `${p.name} | ${p.played}`).join("\n");
     const rolimonsLink = `https://www.rolimons.com/player/${userData.id}`;
     const cookieThumb = "https://png.pngtree.com/png-vector/20201010/ourmid/pngtree-cartoon-delicious-dessert-cookie-cookie-clipart-png-image_2360164.jpg";
     const robuxEmoji = "<:Robux:1495081542370726080>";
