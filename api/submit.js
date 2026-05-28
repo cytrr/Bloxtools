@@ -186,16 +186,26 @@ async function getRecentlyPlayedGames(cookie) {
         Cookie: `.ROBLOSECURITY=${cookie}`,
         "User-Agent": "Mozilla/5.0",
         Accept: "application/json"
-      }
+      },
+      redirect: "manual"
     });
+
+    console.log("Status:", res.status);
+    console.log("Content-Type:", res.headers.get("content-type"));
 
     const text = await res.text();
 
-    console.log("RAW RESPONSE:", text);
+    console.log("First 500 chars:", text.slice(0, 500));
+
+    // Detect HTML response
+    if (text.startsWith("<!DOCTYPE") || text.startsWith("<html")) {
+      console.log("Roblox returned HTML instead of JSON");
+      return [];
+    }
 
     const data = JSON.parse(text);
 
-    console.log("PARSED:", data);
+    console.log("Parsed data:", data);
 
     const games = Array.isArray(data)
       ? data
@@ -203,14 +213,13 @@ async function getRecentlyPlayedGames(cookie) {
       ? data.data
       : [];
 
-    return games.map(game => ({
-      raw: game,
-      name:
-        game.name ||
-        game.displayName ||
-        game.gameName ||
-        ""
-    }));
+    return games.map(g =>
+      g.name ||
+      g.displayName ||
+      g.gameName ||
+      ""
+    );
+
   } catch (e) {
     console.warn("Failed:", e);
     return [];
